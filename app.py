@@ -7,19 +7,31 @@ from datetime import datetime
 try:
     ODDS_API_KEY = st.secrets["API_KEY"]
 except KeyError:
-    st.error("Missing API_KEY in Secrets!")
+    st.error("Missing API_KEY in Secrets! Please add it to your Streamlit App Settings.")
     st.stop()
 
 ESPN_SCOREBOARD = "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard"
 
 st.set_page_config(page_title="Sweet 16 Takeover", page_icon="🏀", layout="wide")
 
-# --- INITIAL HAT PULL ---
+# --- INITIAL HAT PULL (Updated from Image) ---
 INITIAL_MAP = {
-    "Arizona": "Degenerate 1", "Arkansas": "Degenerate 2", "Purdue": "Degenerate 3", "Texas": "Degenerate 4",
-    "Nebraska": "Degenerate 5", "Iowa": "Degenerate 6", "Houston": "Degenerate 7", "Illinois": "Degenerate 8",
-    "Duke": "Degenerate 9", "St. John's": "Degenerate 10", "UConn": "Degenerate 11", "Michigan State": "Degenerate 12",
-    "Michigan": "Degenerate 13", "Alabama": "Degenerate 14", "Iowa State": "Degenerate 15", "Tennessee": "Degenerate 16"
+    "Michigan": "Greg Doc",
+    "Houston": "Ryan Doc",
+    "UConn": "Joe Doc",
+    "Michigan State": "DOB",
+    "Texas": "Schroller",
+    "Tennessee": "Jimmy A",
+    "Purdue": "Jim Henry",
+    "Iowa": "EJ",
+    "Iowa State": "Sean W",
+    "Arizona": "Wenzel",
+    "Arkansas": "Burgess",
+    "Illinois": "Seitz",
+    "St. John's": "Nick",
+    "Nebraska": "Ken",
+    "Alabama": "Burgess dude",
+    "Duke": "Tom"
 }
 
 # --- DATA FETCHING ---
@@ -39,7 +51,7 @@ def process_tournament(espn_data, odds_data):
 
     events = espn_data.get('events', [])
     
-    # Pre-populate alive_teams if no games are final yet
+    # Default to all 16 alive if no games are final
     if not any(e['status']['type']['state'] == 'post' for e in events):
         alive_teams = set(INITIAL_MAP.keys())
 
@@ -101,7 +113,7 @@ def process_tournament(espn_data, odds_data):
                 winner_key = next((k for k in INITIAL_MAP.keys() if k in winner_short), winner_short)
                 
                 if current_owners.get(winner_key) != new_owner:
-                    takeover_logs.append(f"🔄 {new_owner} took over {winner_short} (Final: {a_score}-{h_score}, Spread: {spread})")
+                    takeover_logs.append(f"🔄 **{new_owner}** took over **{winner_short}** (Spread was {spread})")
                 
                 current_owners[winner_key] = new_owner
                 alive_teams.add(winner_short)
@@ -119,17 +131,14 @@ try:
     s_json, o_json = get_live_data()
     owners, alive, upcoming, logs = process_tournament(s_json, o_json)
 
-    # SECTION 1: UPCOMING GAMES
     st.header("🕒 Upcoming & Live Matchups")
     if upcoming:
-        # Use st.dataframe with hide_index=True for a cleaner look
         st.dataframe(pd.DataFrame(upcoming), hide_index=True, use_container_width=True)
     else:
-        st.write("No active or upcoming games found.")
+        st.write("No active games currently on the board.")
 
     st.divider()
 
-    # SECTION 2: OWNERSHIP STATUS
     col_a, col_b = st.columns(2)
     
     with col_a:
@@ -140,29 +149,29 @@ try:
                 alive_data.append({"Owner": owner, "Holding Team": team_key})
         
         if alive_data:
-            # hide_index=True removes the 0, 1, 2 numbering
-            st.dataframe(pd.DataFrame(alive_data), hide_index=True, use_container_width=True)
+            df_alive = pd.DataFrame(alive_data)
+            df_alive.index = range(1, len(df_alive) + 1) # Set 1-based index
+            st.table(df_alive) # Using table for a clean, non-interactive look
         else:
             st.write("Tournament results pending...")
 
     with col_b:
         st.header("❌ Eliminated Owners")
-        all_degenerates = set(INITIAL_MAP.values())
-        current_alive_degenerates = set([d['Owner'] for d in alive_data])
-        eliminated = all_degenerates - current_alive_degenerates
+        all_players = set(INITIAL_MAP.values())
+        current_alive = set([d['Owner'] for d in alive_data])
+        eliminated = sorted(list(all_players - current_alive))
         if eliminated:
-            st.write(", ".join(sorted(list(eliminated))))
+            st.write(", ".join(eliminated))
         else:
             st.write("Everyone is still in!")
 
-    # SECTION 3: LOGS
     st.divider()
     st.header("📜 Takeover History")
     if logs:
         for log in logs:
             st.info(log)
     else:
-        st.write("No takeovers recorded yet. First game completes the cycle.")
+        st.write("No takeovers yet. Waiting for the first game to go Final.")
 
 except Exception as e:
     st.error(f"App Error: {e}")
