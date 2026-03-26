@@ -32,7 +32,6 @@ def calculate_win_prob(odds):
     return abs(odds) / (abs(odds) + 100)
 
 def extract_seed(team_node):
-    """Safely extracts the seed number from ESPN's new dictionary format"""
     rank_data = team_node.get('curatedRank', team_node.get('rank', '—'))
     if isinstance(rank_data, dict):
         return rank_data.get('current', '—')
@@ -54,11 +53,15 @@ def process_pool(espn_data, odds_data):
             
             h_name, a_name = home['team']['displayName'], away['team']['displayName']
             
-            # Cleanly extract the seeds
-            h_seed = extract_seed(home)
-            a_seed = extract_seed(away)
-            team_seeds[h_name] = h_seed
-            team_seeds[a_name] = a_seed
+            # Get the Short Keys to ensure the seeds map perfectly to the Owners Table
+            h_key = next((k for k in INITIAL_MAP.keys() if k.lower() in h_name.lower()), h_name)
+            a_key = next((k for k in INITIAL_MAP.keys() if k.lower() in a_name.lower()), a_name)
+            
+            h_seed, a_seed = extract_seed(home), extract_seed(away)
+            
+            # Map seeds to the SHORT names
+            team_seeds[h_key] = h_seed
+            team_seeds[a_key] = a_seed
             
             h_score, a_score = int(home.get('score', 0)), int(away.get('score', 0))
             status = event['status']['type']['state']
@@ -75,12 +78,7 @@ def process_pool(espn_data, odds_data):
                         if m_ml: h_win_prob = calculate_win_prob(m_ml['outcomes'][0]['price'])
                         break
 
-            def get_owner(full_name):
-                for k in INITIAL_MAP.keys():
-                    if k.lower() in full_name.lower(): return current_owners[k]
-                return "N/A"
-
-            h_owner, a_owner = get_owner(h_name), get_owner(a_name)
+            h_owner, a_owner = current_owners.get(h_key, "N/A"), current_owners.get(a_key, "N/A")
             
             # Live Cover Logic
             cover_status = "—"
@@ -119,7 +117,7 @@ try:
     scores, odds = get_live_data()
     owners, matches, logs, seeds = process_pool(scores, odds)
 
-    st.header("🕒 Matchups & Live Coverage")
+    st.header("🕒 Matchups & Live Coverage", help="Seeds represent the 1-16 ranking within each of the 4 tournament regions.")
     st.dataframe(pd.DataFrame(matches), hide_index=True, use_container_width=True)
 
     st.divider()
@@ -130,14 +128,14 @@ try:
         alive_data = []
         for team, owner in owners.items():
             alive_data.append({
-                "Seed": seeds.get(team, "—"),
+                "Region Seed": seeds.get(team, "—"),
                 "Owner": owner, 
                 "Holding Team": team
             })
             
         df_alive = pd.DataFrame(alive_data)
-        # Convert seeds to numbers for accurate sorting (so 10 doesn't come before 2)
-        df_alive['SeedSort'] = pd.to_numeric(df_alive['Seed'], errors='coerce').fillna(99)
+        # Convert seeds to numbers for accurate sorting
+        df_alive['SeedSort'] = pd.to_numeric(df_alive['Region Seed'], errors='coerce').fillna(99)
         df_alive = df_alive.sort_values("SeedSort").drop(columns=['SeedSort'])
         
         st.dataframe(df_alive, hide_index=True, use_container_width=True)
@@ -145,8 +143,11 @@ try:
     with col2:
         st.header("💰 Pool & Payouts")
         st.metric("Total Pot", "$1,600")
-        st.write(f"🏆 **1st:** $900 | 🥈 **2nd:** $400")
-        st.write(f"🎟️ **F4 Losers:** $100 back (x2)")
+        
+        # Splitting these into separate lines fixes the LaTeX/Math rendering bug
+        st.write("🏆 **1st Place:** $900")
+        st.write("🥈 **2nd Place:** $400")
+        st.write("🎟️ **F4 Losers:** $100 back (x2)")
         
         st.divider()
         st.header("📜 Takeover History")
