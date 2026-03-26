@@ -5,8 +5,6 @@ from datetime import datetime
 
 # --- SECRETS & API CONFIG ---
 ODDS_API_KEY = st.secrets.get("API_KEY", "MISSING_KEY")
-# Appended dates to ensure we pull both Thursday and Friday Sweet 16 games!
-ESPN_API = "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?dates=20260326,20260327"
 ODDS_URL = "https://api.the-odds-api.com/v4/sports/basketball_ncaab/odds/"
 
 st.set_page_config(page_title="Sweet 16 Takeover", page_icon="🏀", layout="wide")
@@ -21,11 +19,20 @@ INITIAL_MAP = {
 
 @st.cache_data(ttl=60)
 def get_live_data():
-    scores = requests.get(ESPN_API).json()
+    # Attempt to fetch the entire 4-day weekend stretch
+    primary_url = "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?dates=20260326-20260329&limit=100"
+    scores = requests.get(primary_url).json()
+    
+    # FALLBACK: If ESPN rejects the dates or returns empty, revert to the base live scoreboard
+    if not scores.get('events'):
+        backup_url = "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard"
+        scores = requests.get(backup_url).json()
+
     odds = []
     if ODDS_API_KEY != "MISSING_KEY":
         params = {'apiKey': ODDS_API_KEY, 'regions': 'us', 'markets': 'spreads,h2h', 'oddsFormat': 'american'}
         odds = requests.get(ODDS_URL, params=params).json()
+        
     return scores, odds
 
 def calculate_win_prob(odds):
@@ -40,7 +47,10 @@ def extract_seed(team_node):
 
 def process_pool(espn_data, odds_data):
     current_owners = INITIAL_MAP.copy()
-    takeover_logs, match_list, team_info = [], [], {}
+    takeover_logs, match_list = [], []
+    
+    # Pre-fill team info so the Owners table NEVER breaks, even if games aren't on the board yet
+    team_info = {team: {"Seed": "—", "Region": "TBD"} for team in INITIAL_MAP.keys()}
     
     events = espn_data.get('events', [])
     for event in events:
@@ -49,7 +59,7 @@ def process_pool(espn_data, odds_data):
             teams = competitions.get('competitors', [])
             if len(teams) < 2: continue
             
-            # Extract the Region from the ESPN game notes (e.g., "South Regional")
+            # Extract Region from notes
             region = "TBD"
             for note in event.get('notes', []):
                 headline = note.get('headline', '')
@@ -68,9 +78,9 @@ def process_pool(espn_data, odds_data):
             
             h_seed, a_seed = extract_seed(home), extract_seed(away)
             
-            # Map Region and Seed together
-            team_info[h_key] = {"Seed": h_seed, "Region": region}
-            team_info[a_key] = {"Seed": a_seed, "Region": region}
+            # Update the pre-filled dictionary with actual live data
+            if h_key in team_info: team_info[h_key] = {"Seed": h_seed, "Region": region}
+            if a_key in team_info: team_info[a_key] = {"Seed": a_seed, "Region": region}
             
             h_score, a_score = int(home.get('score', 0)), int(away.get('score', 0))
             status = event['status']['type']['state']
@@ -126,7 +136,10 @@ try:
     owners, matches, logs, team_info = process_pool(scores, odds)
 
     st.header("🕒 Matchups & Live Coverage")
-    st.dataframe(pd.DataFrame(matches), hide_index=True, use_container_width=True)
+    if matches:
+        st.dataframe(pd.DataFrame(matches), hide_index=True, use_container_width=True)
+    else:
+        st.info("Waiting for ESPN to populate the active scoreboard. Check back shortly.")
 
     st.divider()
     col1, col2 = st.columns([1.5, 1])
@@ -135,18 +148,16 @@ try:
         st.header("✅ Owners Still Alive")
         alive_data = []
         for team, owner in owners.items():
-            info = team_info.get(team, {})
+            info = team_info.get(team, {"Region": "TBD", "Seed": "—"})
             alive_data.append({
-                "Region": info.get("Region", "TBD"),
-                "Seed": info.get("Seed", "—"),
+                "Region": info["Region"],
+                "Seed": info["Seed"],
                 "Owner": owner, 
                 "Holding Team": team
             })
             
         df_alive = pd.DataFrame(alive_data)
         df_alive['SeedSort'] = pd.to_numeric(df_alive['Seed'], errors='coerce').fillna(99)
-        
-        # Sort primarily by Region, then by Seed to group them logically
         df_alive = df_alive.sort_values(by=["Region", "SeedSort"]).drop(columns=['SeedSort'])
         
         st.dataframe(df_alive, hide_index=True, use_container_width=True)
