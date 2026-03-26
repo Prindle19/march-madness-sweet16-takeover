@@ -15,7 +15,6 @@ ESPN_SCOREBOARD = "https://site.api.espn.com/apis/site/v2/sports/basketball/mens
 st.set_page_config(page_title="Sweet 16 Takeover", page_icon="🏀", layout="wide")
 
 # --- INITIAL HAT PULL ---
-# These are your starting assignments. Use the short names.
 INITIAL_MAP = {
     "Arizona": "Degenerate 1", "Arkansas": "Degenerate 2", "Purdue": "Degenerate 3", "Texas": "Degenerate 4",
     "Nebraska": "Degenerate 5", "Iowa": "Degenerate 6", "Houston": "Degenerate 7", "Illinois": "Degenerate 8",
@@ -40,7 +39,7 @@ def process_tournament(espn_data, odds_data):
 
     events = espn_data.get('events', [])
     
-    # Pre-populate alive_teams with all 16 starting teams if no games are final yet
+    # Pre-populate alive_teams if no games are final yet
     if not any(e['status']['type']['state'] == 'post' for e in events):
         alive_teams = set(INITIAL_MAP.keys())
 
@@ -54,7 +53,6 @@ def process_tournament(espn_data, odds_data):
             home = next((t for t in teams if t.get('homeAway') == 'home'), teams[0])
             away = next((t for t in teams if t.get('homeAway') == 'away'), teams[1])
             
-            # Use shortName or nickname for better matching with INITIAL_MAP
             h_name_full = home['team'].get('displayName')
             a_name_full = away['team'].get('displayName')
             h_short = home['team'].get('shortDisplayName', h_name_full)
@@ -70,8 +68,6 @@ def process_tournament(espn_data, odds_data):
                         spread = game_odds['bookmakers'][0]['markets'][0]['outcomes'][0]['point']
                     break
 
-            # 1. Logic for Matching Owners
-            # This helper finds the "Degenerate" assigned to the team name ESPN provides
             def find_owner(name_to_match):
                 for key in INITIAL_MAP.keys():
                     if key in name_to_match:
@@ -81,7 +77,6 @@ def process_tournament(espn_data, odds_data):
             h_owner = find_owner(h_name_full)
             a_owner = find_owner(a_name_full)
 
-            # 2. Track Upcoming/Live Games
             if status in ['pre', 'in']:
                 alive_teams.add(h_short)
                 alive_teams.add(a_short)
@@ -93,19 +88,16 @@ def process_tournament(espn_data, odds_data):
                     "Status": event['status']['type']['shortDetail']
                 })
 
-            # 3. Process Final Results (Takeovers)
             if status == 'post':
                 h_score = int(home.get('score', 0))
                 a_score = int(away.get('score', 0))
                 winner_short = h_short if h_score > a_score else a_short
                 
-                # Rule: (Home Score + Spread) vs Away Score
                 if (h_score + spread) > a_score:
                     new_owner = h_owner
                 else:
                     new_owner = a_owner
 
-                # Identify which internal key (e.g. "UConn") matches the winner
                 winner_key = next((k for k in INITIAL_MAP.keys() if k in winner_short), winner_short)
                 
                 if current_owners.get(winner_key) != new_owner:
@@ -130,7 +122,8 @@ try:
     # SECTION 1: UPCOMING GAMES
     st.header("🕒 Upcoming & Live Matchups")
     if upcoming:
-        st.table(pd.DataFrame(upcoming))
+        # Use st.dataframe with hide_index=True for a cleaner look
+        st.dataframe(pd.DataFrame(upcoming), hide_index=True, use_container_width=True)
     else:
         st.write("No active or upcoming games found.")
 
@@ -141,14 +134,14 @@ try:
     
     with col_a:
         st.header("✅ Owners Still Alive")
-        # Match teams in INITIAL_MAP to their current status
         alive_data = []
         for team_key, owner in owners.items():
             if any(team_key in a_team for a_team in alive):
                 alive_data.append({"Owner": owner, "Holding Team": team_key})
         
         if alive_data:
-            st.table(pd.DataFrame(alive_data))
+            # hide_index=True removes the 0, 1, 2 numbering
+            st.dataframe(pd.DataFrame(alive_data), hide_index=True, use_container_width=True)
         else:
             st.write("Tournament results pending...")
 
