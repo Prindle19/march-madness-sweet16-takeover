@@ -1,8 +1,7 @@
 import streamlit as st
 import requests
 import pandas as pd
-from datetime import datetime
-from zoneinfo import ZoneInfo
+from datetime import datetime, timedelta
 
 # --- SECRETS & API CONFIG ---
 ODDS_API_KEY = st.secrets.get("API_KEY", "MISSING_KEY")
@@ -34,41 +33,56 @@ TEAM_INFO = {
 # --- FETCHING ENGINES ---
 @st.cache_data(ttl=60)
 def get_espn_scores():
-    primary = "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?dates=20260326-20260329&limit=100"
+    # groups=50 forces ESPN to ONLY pull the active March Madness tournament games
+    primary = "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?groups=50&limit=100"
     scores = requests.get(primary).json()
     if not scores.get('events'):
         scores = requests.get("https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard").json()
     return scores
 
-@st.cache_data(ttl=900) # Live odds refresh every 15 mins
+@st.cache_data(ttl=900)
 def get_live_odds():
     if ODDS_API_KEY == "MISSING_KEY": return []
     params = {
         'apiKey': ODDS_API_KEY, 'regions': 'us', 'markets': 'spreads,h2h',
         'bookmakers': 'draftkings', 'oddsFormat': 'american'
     }
-    return requests.get(LIVE_ODDS_URL, params=params).json()
+    try:
+        res = requests.get(LIVE_ODDS_URL, params=params)
+        return res.json() if res.status_code == 200 else []
+    except: return []
 
-@st.cache_data(ttl=None) # Historical data NEVER changes, cache indefinitely!
+@st.cache_data(ttl=None) # Historical data NEVER changes, cache indefinitely
 def get_historical_odds(target_utc_date):
     if ODDS_API_KEY == "MISSING_KEY": return {}
     params = {
         'apiKey': ODDS_API_KEY, 'regions': 'us', 'markets': 'spreads,h2h',
         'bookmakers': 'draftkings', 'oddsFormat': 'american', 'date': target_utc_date
     }
-    return requests.get(HISTORICAL_ODDS_URL, params=params).json()
+    try:
+        res = requests.get(HISTORICAL_ODDS_URL, params=params)
+        return res.json() if res.status_code == 200 else {}
+    except: return {}
 
 def calculate_win_prob(odds):
     if odds == 0: return 0.50
     if odds > 0: return 100 / (odds + 100)
     return abs(odds) / (abs(odds) + 100)
 
+def safe_int(val):
+    """Prevents ESPN's empty score strings from crashing the app."""
+    try: return int(val)
+    except: return 0
+
 def process_pool(espn_data):
     current_owners = INITIAL_MAP.copy()
     takeover_logs, match_list = [], []
     
     live_odds = get_live_odds()
-    now_et = datetime.now(ZoneInfo("America/New_York"))
+    
+    # Simple timezone math: Current UTC time minus 4 hours = Eastern Daylight Time
+    now_utc = datetime.utcnow()
+    now_et = now_utc - timedelta(hours=4)
     
     events = espn_data.get('events', [])
     for event in events:
@@ -77,18 +91,28 @@ def process_pool(espn_data):
             teams = competitions.get('competitors', [])
             if len(teams) < 2: continue
             
-            # 1. Parse Game Time
-            game_time_utc = datetime.strptime(event['date'], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=ZoneInfo("UTC"))
-            game_time_et = game_time_utc.astimezone(ZoneInfo("America/New_York"))
+            # 1. Parse Game Time safely
+            date_str = event.get('date', '2026-01-01T00:00:00Z')
+            if "T" in date_str and "Z" in date_str:
+                game_time_utc = datetime.strptime(date_str, "%Y-%m-%dT%H:%M:%SZ")
+            else:
+                game_time_utc = datetime.utcnow()
+                
+            game_time_et = game_time_utc - timedelta(hours=4)
             lock_time_et = game_time_et.replace(hour=16, minute=0, second=0, microsecond=0)
             
-            # Determine if this specific game has passed its 4:00 PM lock window
-            is_locked = now_et >= lock_time_et
+            # Determine if this game has passed its 4:00 PM lock window
+            is_locked = False
+            if now_et.date() > game_time_et.date():
+                is_locked = True
+            elif now_et.date() == game_time_et.date() and now_et.hour >= 16:
+                is_locked = True
             
-            home = next(t for t in teams if t['homeAway'] == 'home')
-            away = next(t for t in teams if t['homeAway'] == 'away')
+            home = next((t for t in teams if t.get('homeAway') == 'home'), teams[0])
+            away = next((t for t in teams if t.get('homeAway') == 'away'), teams[1])
             
-            h_name, a_name = home['team']['displayName'], away['team']['displayName']
+            h_name = home.get('team', {}).get('displayName', 'Unknown')
+            a_name = away.get('team', {}).get('displayName', 'Unknown')
             
             h_key = next((k for k in INITIAL_MAP.keys() if k.lower() in h_name.lower()), h_name)
             a_key = next((k for k in INITIAL_MAP.keys() if k.lower() in a_name.lower()), a_name)
@@ -96,34 +120,38 @@ def process_pool(espn_data):
             h_seed = TEAM_INFO.get(h_key, {}).get("Seed", "—")
             a_seed = TEAM_INFO.get(a_key, {}).get("Seed", "—")
             
-            h_score, a_score = int(home.get('score', 0)), int(away.get('score', 0))
-            status = event['status']['type']['state']
+            h_score = safe_int(home.get('score', 0))
+            a_score = safe_int(away.get('score', 0))
             
-            # 2. Select Odds Source (Live vs Historical)
+            status = event.get('status', {}).get('type', {}).get('state', 'pre')
+            short_detail = event.get('status', {}).get('type', {}).get('shortDetail', 'TBD')
+            
+            # 2. Select Odds Source
             spread, ml = 0, 0
             if is_locked:
-                # 4:00 PM EDT is exactly 20:00:00Z UTC
+                # 4:00 PM EDT is 20:00:00Z UTC
                 lock_time_utc_str = game_time_et.strftime("%Y-%m-%d") + "T20:00:00Z"
                 hist_response = get_historical_odds(lock_time_utc_str)
-                odds_to_search = hist_response.get('data', []) # Historical endpoint nests the games in 'data'
+                odds_to_search = hist_response.get('data', [])
             else:
                 odds_to_search = live_odds
 
-            # 3. Find the lines
+            # 3. Find the lines safely
             if odds_to_search and isinstance(odds_to_search, list):
                 for game in odds_to_search:
                     if h_name in game.get('home_team', "") or a_name in game.get('home_team', ""):
                         markets = game.get('bookmakers', [{}])[0].get('markets', [])
                         
-                        m_spread = next((m for m in markets if m['key'] == 'spreads'), None)
-                        if m_spread: spread = m_spread['outcomes'][0]['point']
+                        m_spread = next((m for m in markets if m.get('key') == 'spreads'), None)
+                        if m_spread: spread = m_spread.get('outcomes', [{}])[0].get('point', 0)
                             
-                        m_h2h = next((m for m in markets if m['key'] == 'h2h'), None)
-                        if m_h2h: ml = m_h2h['outcomes'][0]['price']
+                        m_h2h = next((m for m in markets if m.get('key') == 'h2h'), None)
+                        if m_h2h: ml = m_h2h.get('outcomes', [{}])[0].get('price', 0)
                         break
 
             h_win_prob = calculate_win_prob(ml)
-            h_owner, a_owner = current_owners.get(h_key, "N/A"), current_owners.get(a_key, "N/A")
+            h_owner = current_owners.get(h_key, "N/A")
+            a_owner = current_owners.get(a_key, "N/A")
             
             display_spread = f"🔒 {h_name} {spread}" if is_locked else f"{h_name} {spread}"
             
@@ -136,7 +164,7 @@ def process_pool(espn_data):
 
             match_list.append({
                 "Matchup": f"({a_seed}) {a_name} @ ({h_seed}) {h_name}",
-                "Status": event['status']['type']['shortDetail'],
+                "Status": short_detail,
                 "Score": f"{a_score} - {h_score}",
                 "Favorite": f"⭐ {h_name}" if spread < 0 else f"⭐ {a_name}",
                 "Away Owner": a_owner,
@@ -153,8 +181,12 @@ def process_pool(espn_data):
                 if current_owners[winner_key] != new_owner:
                     takeover_logs.append(f"🔄 **{new_owner}** took over **{winner}** (Closing Spread: {spread})")
                 current_owners[winner_key] = new_owner
-        except: continue
-        
+                
+        except Exception as e:
+            # Removed silent 'continue' so we never get completely blank tables again
+            st.warning(f"Minor processing error on a game, but app is recovering.")
+            continue
+            
     return current_owners, match_list, takeover_logs
 
 # --- UI ---
@@ -164,7 +196,7 @@ try:
     scores = get_espn_scores()
     owners, matches, logs = process_pool(scores)
 
-    st.header("🕒 Matchups & Live Coverage", help="A 🔒 indicates the game has passed 4:00 PM ET and the historical DraftKings line has been permanently frozen for takeover calculations.")
+    st.header("🕒 Matchups & Live Coverage", help="A 🔒 indicates the game has passed 4:00 PM ET and the historical DraftKings line has been permanently frozen.")
     if matches:
         st.dataframe(pd.DataFrame(matches), hide_index=True, use_container_width=True)
     else:
