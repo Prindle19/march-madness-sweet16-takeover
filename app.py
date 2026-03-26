@@ -5,7 +5,8 @@ from datetime import datetime
 
 # --- SECRETS & API CONFIG ---
 ODDS_API_KEY = st.secrets.get("API_KEY", "MISSING_KEY")
-ESPN_API = "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard"
+# Appended dates to ensure we pull both Thursday and Friday Sweet 16 games!
+ESPN_API = "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?dates=20260326,20260327"
 ODDS_URL = "https://api.the-odds-api.com/v4/sports/basketball_ncaab/odds/"
 
 st.set_page_config(page_title="Sweet 16 Takeover", page_icon="🏀", layout="wide")
@@ -39,7 +40,7 @@ def extract_seed(team_node):
 
 def process_pool(espn_data, odds_data):
     current_owners = INITIAL_MAP.copy()
-    takeover_logs, match_list, team_seeds = [], [], {}
+    takeover_logs, match_list, team_info = [], [], {}
     
     events = espn_data.get('events', [])
     for event in events:
@@ -48,20 +49,28 @@ def process_pool(espn_data, odds_data):
             teams = competitions.get('competitors', [])
             if len(teams) < 2: continue
             
+            # Extract the Region from the ESPN game notes (e.g., "South Regional")
+            region = "TBD"
+            for note in event.get('notes', []):
+                headline = note.get('headline', '')
+                for r in ['South', 'Midwest', 'East', 'West']:
+                    if r in headline:
+                        region = r
+                        break
+            
             home = next(t for t in teams if t['homeAway'] == 'home')
             away = next(t for t in teams if t['homeAway'] == 'away')
             
             h_name, a_name = home['team']['displayName'], away['team']['displayName']
             
-            # Get the Short Keys to ensure the seeds map perfectly to the Owners Table
             h_key = next((k for k in INITIAL_MAP.keys() if k.lower() in h_name.lower()), h_name)
             a_key = next((k for k in INITIAL_MAP.keys() if k.lower() in a_name.lower()), a_name)
             
             h_seed, a_seed = extract_seed(home), extract_seed(away)
             
-            # Map seeds to the SHORT names
-            team_seeds[h_key] = h_seed
-            team_seeds[a_key] = a_seed
+            # Map Region and Seed together
+            team_info[h_key] = {"Seed": h_seed, "Region": region}
+            team_info[a_key] = {"Seed": a_seed, "Region": region}
             
             h_score, a_score = int(home.get('score', 0)), int(away.get('score', 0))
             status = event['status']['type']['state']
@@ -80,7 +89,6 @@ def process_pool(espn_data, odds_data):
 
             h_owner, a_owner = current_owners.get(h_key, "N/A"), current_owners.get(a_key, "N/A")
             
-            # Live Cover Logic
             cover_status = "—"
             if status == 'in':
                 if (h_score + spread) > a_score:
@@ -108,16 +116,16 @@ def process_pool(espn_data, odds_data):
                     takeover_logs.append(f"🔄 **{new_owner}** took over **{winner}**")
                 current_owners[winner_key] = new_owner
         except: continue
-    return current_owners, match_list, takeover_logs, team_seeds
+    return current_owners, match_list, takeover_logs, team_info
 
 # --- UI ---
 st.title("🏀 Sweet 16 Takeover Pool")
 
 try:
     scores, odds = get_live_data()
-    owners, matches, logs, seeds = process_pool(scores, odds)
+    owners, matches, logs, team_info = process_pool(scores, odds)
 
-    st.header("🕒 Matchups & Live Coverage", help="Seeds represent the 1-16 ranking within each of the 4 tournament regions.")
+    st.header("🕒 Matchups & Live Coverage")
     st.dataframe(pd.DataFrame(matches), hide_index=True, use_container_width=True)
 
     st.divider()
@@ -127,24 +135,25 @@ try:
         st.header("✅ Owners Still Alive")
         alive_data = []
         for team, owner in owners.items():
+            info = team_info.get(team, {})
             alive_data.append({
-                "Region Seed": seeds.get(team, "—"),
+                "Region": info.get("Region", "TBD"),
+                "Seed": info.get("Seed", "—"),
                 "Owner": owner, 
                 "Holding Team": team
             })
             
         df_alive = pd.DataFrame(alive_data)
-        # Convert seeds to numbers for accurate sorting
-        df_alive['SeedSort'] = pd.to_numeric(df_alive['Region Seed'], errors='coerce').fillna(99)
-        df_alive = df_alive.sort_values("SeedSort").drop(columns=['SeedSort'])
+        df_alive['SeedSort'] = pd.to_numeric(df_alive['Seed'], errors='coerce').fillna(99)
+        
+        # Sort primarily by Region, then by Seed to group them logically
+        df_alive = df_alive.sort_values(by=["Region", "SeedSort"]).drop(columns=['SeedSort'])
         
         st.dataframe(df_alive, hide_index=True, use_container_width=True)
 
     with col2:
         st.header("💰 Pool & Payouts")
         st.metric("Total Pot", "$1,600")
-        
-        # Splitting these into separate lines fixes the LaTeX/Math rendering bug
         st.write("🏆 **1st Place:** $900")
         st.write("🥈 **2nd Place:** $400")
         st.write("🎟️ **F4 Losers:** $100 back (x2)")
