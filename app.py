@@ -44,7 +44,7 @@ def save_locked_odds(odds_dict):
         json.dump(odds_dict, f)
 
 # --- QUOTA-SAVVY FETCHING ---
-@st.cache_data(ttl=60) # ESPN is free, refresh every 60s
+@st.cache_data(ttl=60)
 def get_espn_scores():
     primary = "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?dates=20260326-20260329&limit=100"
     scores = requests.get(primary).json()
@@ -52,14 +52,14 @@ def get_espn_scores():
         scores = requests.get("https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard").json()
     return scores
 
-@st.cache_data(ttl=900) # SHARED CACHE: 15 minutes! Protects your quota.
+@st.cache_data(ttl=900)
 def get_draftkings_odds():
     if ODDS_API_KEY == "MISSING_KEY": return []
     params = {
         'apiKey': ODDS_API_KEY, 
         'regions': 'us', 
-        'markets': 'spreads,h2h', # Both markets returned
-        'bookmakers': 'draftkings', # Isolated to DK
+        'markets': 'spreads,h2h',
+        'bookmakers': 'draftkings',
         'oddsFormat': 'american'
     }
     return requests.get(ODDS_URL, params=params).json()
@@ -122,6 +122,12 @@ def process_pool(espn_data, odds_data):
             h_win_prob = calculate_win_prob(ml)
             h_owner, a_owner = current_owners.get(h_key, "N/A"), current_owners.get(a_key, "N/A")
             
+            # --- VISUAL LOCK INDICATOR ---
+            if status == 'pre':
+                display_spread = f"{h_name} {spread}"
+            else:
+                display_spread = f"🔒 {h_name} {spread}"
+            
             cover_status = "—"
             if status == 'in':
                 if (h_score + spread) > a_score:
@@ -136,7 +142,7 @@ def process_pool(espn_data, odds_data):
                 "Favorite": f"⭐ {h_name}" if spread < 0 else f"⭐ {a_name}",
                 "Away Owner": a_owner,
                 "Home Owner": h_owner,
-                "Locked Spread": f"{h_name} {spread}",
+                "Spread": display_spread,
                 "Win Prob": f"{h_name} {h_win_prob:.1%}",
                 "Live Cover": cover_status
             })
@@ -163,7 +169,7 @@ try:
     odds = get_draftkings_odds()
     owners, matches, logs = process_pool(scores, odds)
 
-    st.header("🕒 Matchups & Live Coverage", help="Odds are fetched from DraftKings and refresh every 15 mins. Once a game tips off, the line permanently locks.")
+    st.header("🕒 Matchups & Live Coverage", help="Odds are fetched from DraftKings. A 🔒 indicates the game has tipped off and the line is permanently frozen for takeover calculations.")
     if matches:
         st.dataframe(pd.DataFrame(matches), hide_index=True, use_container_width=True)
     else:
