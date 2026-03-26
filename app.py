@@ -119,6 +119,7 @@ def process_pool(espn_data):
             short_detail = event.get('status', {}).get('type', {}).get('shortDetail', 'TBD')
             
             spread, ml = 0, 0
+            last_update_str = None
             using_fallback = False
             
             if is_locked:
@@ -140,7 +141,6 @@ def process_pool(espn_data):
             else:
                 odds_to_search = live_odds
 
-            # --- BULLETPROOF FUZZY MATCHING ---
             n_h_key = normalize(h_key)
             n_a_key = normalize(a_key)
             
@@ -149,7 +149,6 @@ def process_pool(espn_data):
                     n_odds_home = normalize(game.get('home_team', ''))
                     n_odds_away = normalize(game.get('away_team', ''))
                     
-                    # Match by ensuring both teams are present in the DraftKings matchup
                     if (n_h_key in n_odds_home or n_h_key in n_odds_away) and \
                        (n_a_key in n_odds_home or n_a_key in n_odds_away):
                         
@@ -159,8 +158,8 @@ def process_pool(espn_data):
                         
                         m_spread = next((m for m in markets if m.get('key') == 'spreads'), None)
                         if m_spread and m_spread.get('outcomes'): 
+                            last_update_str = m_spread.get('last_update')
                             for out in m_spread['outcomes']:
-                                # Directly assign the spread to ESPN's home team
                                 if n_h_key in normalize(out.get('name', '')):
                                     spread = float(out.get('point', 0))
                                     break
@@ -177,9 +176,19 @@ def process_pool(espn_data):
             h_owner = current_owners.get(h_key, "N/A")
             a_owner = current_owners.get(a_key, "N/A")
             
+            # --- VISUAL LOCK FORMATTING WITH DRAFTKINGS TIMESTAMP ---
+            lock_info = ""
+            if is_locked and not using_fallback and last_update_str:
+                try:
+                    dt = pd.to_datetime(last_update_str, utc=True).tz_convert('America/New_York')
+                    formatted_time = dt.strftime('%I:%M %p').lstrip('0')
+                    lock_info = f" (DraftKings @ {formatted_time} ET)"
+                except:
+                    lock_info = " (DraftKings)"
+
             display_spread = f"{h_name} {spread}"
             if is_locked and not using_fallback:
-                display_spread = f"🔒 {h_name} {spread}"
+                display_spread = f"🔒 {h_name} {spread}{lock_info}"
             elif is_locked and using_fallback:
                 display_spread = f"⚠️ {h_name} {spread}"
             
@@ -225,9 +234,9 @@ try:
 
     if api_errors:
         for err in api_errors:
-            st.error(f"Historical Odds Error: {err}. App has fallen back to Live Odds to prevent zeros.")
+            st.error(f"Historical Odds Error: {err}. App has fallen back to Live Odds.")
 
-    st.header("🕒 Matchups & Live Coverage", help="A 🔒 indicates the historical line has been permanently frozen. A ⚠️ means the API failed and we are using Live Odds as a backup.")
+    st.header("🕒 Matchups & Live Coverage", help="A 🔒 indicates the historical DraftKings line has been permanently frozen. The timestamp shows exactly when DraftKings posted that line.")
     if matches:
         st.dataframe(pd.DataFrame(matches), hide_index=True, use_container_width=True)
     else:
