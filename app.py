@@ -1,7 +1,6 @@
 import streamlit as st
 import requests
 import pandas as pd
-from datetime import datetime
 
 # --- SECRETS & API CONFIG ---
 ODDS_API_KEY = st.secrets.get("API_KEY", "MISSING_KEY")
@@ -17,14 +16,25 @@ INITIAL_MAP = {
     "St. John's": "Nick", "Nebraska": "Ken", "Alabama": "Burgess dude", "Duke": "Tom"
 }
 
-# --- THE BULLETPROOF REGION MAP ---
-# ESPN's API is flaky with region labels, so mapping them locally ensures 100% accuracy.
-# Adjust these if the bracket regions are slightly different!
-REGION_MAP = {
-    "Purdue": "Midwest", "Texas": "Midwest", "Tennessee": "Midwest", "Michigan State": "Midwest",
-    "Arizona": "West", "Arkansas": "West", "Iowa State": "West", "St. John's": "West",
-    "Houston": "South", "Illinois": "South", "Alabama": "South", "Duke": "South",
-    "UConn": "East", "Nebraska": "East", "Iowa": "East", "Michigan": "East"
+# --- HARDCODED TOURNAMENT DATA ---
+# This guarantees seeds and regions never show up as "TBD" or missing.
+TEAM_INFO = {
+    "Michigan": {"Seed": 1, "Region": "Midwest"},
+    "Houston": {"Seed": 2, "Region": "South"},
+    "UConn": {"Seed": 2, "Region": "East"},
+    "Michigan State": {"Seed": 3, "Region": "East"},
+    "Texas": {"Seed": 11, "Region": "West"},
+    "Tennessee": {"Seed": 6, "Region": "Midwest"},
+    "Purdue": {"Seed": 2, "Region": "West"},
+    "Iowa": {"Seed": 9, "Region": "South"},
+    "Iowa State": {"Seed": 2, "Region": "Midwest"},
+    "Arizona": {"Seed": 1, "Region": "West"},
+    "Arkansas": {"Seed": 4, "Region": "West"},
+    "Illinois": {"Seed": 3, "Region": "South"},
+    "St. John's": {"Seed": 5, "Region": "East"},
+    "Nebraska": {"Seed": 4, "Region": "South"},
+    "Alabama": {"Seed": 4, "Region": "Midwest"},
+    "Duke": {"Seed": 1, "Region": "East"}
 }
 
 @st.cache_data(ttl=60)
@@ -32,6 +42,7 @@ def get_live_data():
     primary_url = "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?dates=20260326-20260329&limit=100"
     scores = requests.get(primary_url).json()
     
+    # Fallback to base live scoreboard if date filter fails
     if not scores.get('events'):
         backup_url = "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard"
         scores = requests.get(backup_url).json()
@@ -47,18 +58,9 @@ def calculate_win_prob(odds):
     if odds > 0: return 100 / (odds + 100)
     return abs(odds) / (abs(odds) + 100)
 
-def extract_seed(team_node):
-    rank_data = team_node.get('curatedRank', team_node.get('rank', '—'))
-    if isinstance(rank_data, dict):
-        return rank_data.get('current', '—')
-    return rank_data
-
 def process_pool(espn_data, odds_data):
     current_owners = INITIAL_MAP.copy()
     takeover_logs, match_list = [], []
-    
-    # Pre-fill team info using our Bulletproof Region Map
-    team_info = {team: {"Seed": "—", "Region": REGION_MAP.get(team, "Unknown")} for team in INITIAL_MAP.keys()}
     
     events = espn_data.get('events', [])
     for event in events:
@@ -72,14 +74,13 @@ def process_pool(espn_data, odds_data):
             
             h_name, a_name = home['team']['displayName'], away['team']['displayName']
             
+            # Match ESPN names to our hardcoded dictionaries
             h_key = next((k for k in INITIAL_MAP.keys() if k.lower() in h_name.lower()), h_name)
             a_key = next((k for k in INITIAL_MAP.keys() if k.lower() in a_name.lower()), a_name)
             
-            h_seed, a_seed = extract_seed(home), extract_seed(away)
-            
-            # Update only the seed dynamically, rely on REGION_MAP for the region
-            if h_key in team_info: team_info[h_key]["Seed"] = h_seed
-            if a_key in team_info: team_info[a_key]["Seed"] = a_seed
+            # Pull static seed data directly from our hardcoded map
+            h_seed = TEAM_INFO.get(h_key, {}).get("Seed", "—")
+            a_seed = TEAM_INFO.get(a_key, {}).get("Seed", "—")
             
             h_score, a_score = int(home.get('score', 0)), int(away.get('score', 0))
             status = event['status']['type']['state']
@@ -125,14 +126,14 @@ def process_pool(espn_data, odds_data):
                     takeover_logs.append(f"🔄 **{new_owner}** took over **{winner}**")
                 current_owners[winner_key] = new_owner
         except: continue
-    return current_owners, match_list, takeover_logs, team_info
+    return current_owners, match_list, takeover_logs
 
 # --- UI ---
 st.title("🏀 Sweet 16 Takeover Pool")
 
 try:
     scores, odds = get_live_data()
-    owners, matches, logs, team_info = process_pool(scores, odds)
+    owners, matches, logs = process_pool(scores, odds)
 
     st.header("🕒 Matchups & Live Coverage")
     if matches:
@@ -147,7 +148,7 @@ try:
         st.header("✅ Owners Still Alive")
         alive_data = []
         for team, owner in owners.items():
-            info = team_info.get(team, {"Region": "Unknown", "Seed": "—"})
+            info = TEAM_INFO.get(team, {"Region": "Unknown", "Seed": 99})
             alive_data.append({
                 "Region": info["Region"],
                 "Seed": info["Seed"],
@@ -156,9 +157,8 @@ try:
             })
             
         df_alive = pd.DataFrame(alive_data)
-        df_alive['SeedSort'] = pd.to_numeric(df_alive['Seed'], errors='coerce').fillna(99)
         # Groups by Region (East, Midwest, South, West), then sorts 1-16 within the region
-        df_alive = df_alive.sort_values(by=["Region", "SeedSort"]).drop(columns=['SeedSort'])
+        df_alive = df_alive.sort_values(by=["Region", "Seed"])
         
         st.dataframe(df_alive, hide_index=True, use_container_width=True)
 
