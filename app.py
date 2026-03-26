@@ -1,7 +1,6 @@
 import streamlit as st
 import requests
 import pandas as pd
-from datetime import datetime, timedelta
 
 # --- SECRETS & API CONFIG ---
 ODDS_API_KEY = st.secrets.get("API_KEY", "MISSING_KEY")
@@ -33,7 +32,6 @@ TEAM_INFO = {
 # --- FETCHING ENGINES ---
 @st.cache_data(ttl=60)
 def get_espn_scores():
-    # groups=50 forces ESPN to ONLY pull the active March Madness tournament games
     primary = "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?groups=50&limit=100"
     scores = requests.get(primary).json()
     if not scores.get('events'):
@@ -52,7 +50,7 @@ def get_live_odds():
         return res.json() if res.status_code == 200 else []
     except: return []
 
-@st.cache_data(ttl=None) # Historical data NEVER changes, cache indefinitely
+@st.cache_data(ttl=None) # Cache indefinitely once pulled
 def get_historical_odds(target_utc_date):
     if ODDS_API_KEY == "MISSING_KEY": return {}
     params = {
@@ -70,7 +68,6 @@ def calculate_win_prob(odds):
     return abs(odds) / (abs(odds) + 100)
 
 def safe_int(val):
-    """Prevents ESPN's empty score strings from crashing the app."""
     try: return int(val)
     except: return 0
 
@@ -80,9 +77,8 @@ def process_pool(espn_data):
     
     live_odds = get_live_odds()
     
-    # Simple timezone math: Current UTC time minus 4 hours = Eastern Daylight Time
-    now_utc = datetime.utcnow()
-    now_et = now_utc - timedelta(hours=4)
+    # Grab the current time directly in Eastern Time
+    now_et = pd.Timestamp.utcnow().tz_convert('America/New_York')
     
     events = espn_data.get('events', [])
     for event in events:
@@ -91,15 +87,9 @@ def process_pool(espn_data):
             teams = competitions.get('competitors', [])
             if len(teams) < 2: continue
             
-            # 1. Parse Game Time safely
+            # 1. Bulletproof Date Parsing using Pandas
             date_str = event.get('date', '2026-01-01T00:00:00Z')
-            if "T" in date_str and "Z" in date_str:
-                game_time_utc = datetime.strptime(date_str, "%Y-%m-%dT%H:%M:%SZ")
-            else:
-                game_time_utc = datetime.utcnow()
-                
-            game_time_et = game_time_utc - timedelta(hours=4)
-            lock_time_et = game_time_et.replace(hour=16, minute=0, second=0, microsecond=0)
+            game_time_et = pd.to_datetime(date_str, utc=True).tz_convert('America/New_York')
             
             # Determine if this game has passed its 4:00 PM lock window
             is_locked = False
@@ -126,11 +116,13 @@ def process_pool(espn_data):
             status = event.get('status', {}).get('type', {}).get('state', 'pre')
             short_detail = event.get('status', {}).get('type', {}).get('shortDetail', 'TBD')
             
-            # 2. Select Odds Source
+            # 2. Select Odds Source Safely
             spread, ml = 0, 0
             if is_locked:
-                # 4:00 PM EDT is 20:00:00Z UTC
-                lock_time_utc_str = game_time_et.strftime("%Y-%m-%d") + "T20:00:00Z"
+                # Format exactly to 4:00 PM ET -> UTC String
+                lock_time_utc = game_time_et.replace(hour=16, minute=0, second=0).tz_convert('UTC')
+                lock_time_utc_str = lock_time_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+                
                 hist_response = get_historical_odds(lock_time_utc_str)
                 odds_to_search = hist_response.get('data', [])
             else:
@@ -140,13 +132,17 @@ def process_pool(espn_data):
             if odds_to_search and isinstance(odds_to_search, list):
                 for game in odds_to_search:
                     if h_name in game.get('home_team', "") or a_name in game.get('home_team', ""):
-                        markets = game.get('bookmakers', [{}])[0].get('markets', [])
+                        bms = game.get('bookmakers', [])
+                        if not bms: continue
+                        markets = bms[0].get('markets', [])
                         
                         m_spread = next((m for m in markets if m.get('key') == 'spreads'), None)
-                        if m_spread: spread = m_spread.get('outcomes', [{}])[0].get('point', 0)
+                        if m_spread and m_spread.get('outcomes'): 
+                            spread = float(m_spread['outcomes'][0].get('point', 0))
                             
                         m_h2h = next((m for m in markets if m.get('key') == 'h2h'), None)
-                        if m_h2h: ml = m_h2h.get('outcomes', [{}])[0].get('price', 0)
+                        if m_h2h and m_h2h.get('outcomes'): 
+                            ml = float(m_h2h['outcomes'][0].get('price', 0))
                         break
 
             h_win_prob = calculate_win_prob(ml)
@@ -183,8 +179,8 @@ def process_pool(espn_data):
                 current_owners[winner_key] = new_owner
                 
         except Exception as e:
-            # Removed silent 'continue' so we never get completely blank tables again
-            st.warning(f"Minor processing error on a game, but app is recovering.")
+            # Now we actually print the error to figure out what broke!
+            st.warning(f"Error processing {h_name if 'h_name' in locals() else 'a game'}: {str(e)}")
             continue
             
     return current_owners, match_list, takeover_logs
