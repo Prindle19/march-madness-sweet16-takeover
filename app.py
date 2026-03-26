@@ -5,25 +5,18 @@ from datetime import datetime
 
 # --- SECRETS & API CONFIG ---
 try:
-    ODDS_API_KEY = st.secrets["API_KEY"]
+    API_KEY = st.secrets["API_KEY"]
 except KeyError:
-    st.error("Missing API_KEY in Secrets!")
+    st.error("Missing API_KEY in Secrets! Please add it to your Streamlit App Settings.")
     st.stop()
 
-ESPN_SCOREBOARD = "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard"
+# ESPN is free/unlimited; The Odds API is precious
+ESPN_API = "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard"
+ODDS_URL = "https://api.the-odds-api.com/v4/sports/basketball_ncaab/odds/"
 
 st.set_page_config(page_title="Sweet 16 Takeover", page_icon="🏀", layout="wide")
 
-# --- CURRENT NATIONAL TITLE ODDS (Implied % based on March 26 Markets) ---
-# Implied probability = 100 / (Fractional Odds + 1)
-WIN_PROBS = {
-    "Michigan": "23.5%", "Arizona": "23.5%", "Duke": "19.0%", "Houston": "12.5%",
-    "Purdue": "7.7%", "Illinois": "6.7%", "Iowa State": "5.6%", "UConn": "4.3%",
-    "Michigan State": "3.2%", "St. John's": "3.2%", "Arkansas": "2.4%", "Nebraska": "2.0%",
-    "Tennessee": "1.1%", "Alabama": "1.0%", "Iowa": "0.5%", "Texas": "0.2%"
-}
-
-# --- INITIAL HAT PULL ---
+# --- INITIAL HAT PULL (From your provided image) ---
 INITIAL_MAP = {
     "Michigan": "Greg Doc", "Houston": "Ryan Doc", "UConn": "Joe Doc", "Michigan State": "DOB",
     "Texas": "Schroller", "Tennessee": "Jimmy A", "Purdue": "Jim Henry", "Iowa": "EJ",
@@ -31,119 +24,116 @@ INITIAL_MAP = {
     "St. John's": "Nick", "Nebraska": "Ken", "Alabama": "Burgess dude", "Duke": "Tom"
 }
 
-@st.cache_data(ttl=60)
-def get_live_data():
-    scores = requests.get(ESPN_SCOREBOARD).json()
-    odds_url = f"https://api.the-odds-api.com/v4/sports/basketball_ncaab/odds/?apiKey={ODDS_API_KEY}&regions=us&markets=spreads"
-    odds = requests.get(odds_url).json()
-    return scores, odds
+# --- QUOTA-SAVVY DATA FETCHING ---
+@st.cache_data(ttl=60) # ESPN is free, refresh scores every minute
+def get_espn_scores():
+    return requests.get(ESPN_API).json()
 
-def process_tournament(espn_data, odds_data):
+@st.cache_data(ttl=900) # CACHE ODDS FOR 15 MINS to save quota
+def get_combined_odds(_api_key):
+    # Combine spreads and h2h (moneyline) into ONE API call
+    params = {
+        'apiKey': _api_key,
+        'regions': 'us',
+        'markets': 'spreads,h2h',
+        'oddsFormat': 'american'
+    }
+    return requests.get(ODDS_URL, params=params).json()
+
+def calculate_win_prob(odds):
+    """Converts American odds to percentage"""
+    if odds > 0: return 100 / (odds + 100)
+    return abs(odds) / (abs(odds) + 100)
+
+def process_pool(espn_data, odds_data):
     current_owners = INITIAL_MAP.copy()
-    takeover_logs = []
-    alive_teams = set()
-    upcoming_games = []
-
+    takeover_logs, upcoming, team_stats = [], [], {}
+    
     events = espn_data.get('events', [])
-    if not any(e['status']['type']['state'] == 'post' for e in events):
-        alive_teams = set(INITIAL_MAP.keys())
-
     for event in events:
         try:
-            comps = event.get('competitions', [])
-            if not comps: continue
-            teams = comps[0].get('competitors', [])
-            if len(teams) < 2: continue
-
-            home = next((t for t in teams if t.get('homeAway') == 'home'), teams[0])
-            away = next((t for t in teams if t.get('homeAway') == 'away'), teams[1])
-            
-            h_name_full = home['team'].get('displayName')
-            a_name_full = away['team'].get('displayName')
-            h_short = home['team'].get('shortDisplayName', h_name_full)
-            a_short = away['team'].get('shortDisplayName', a_name_full)
+            teams = event['competitions'][0]['competitors']
+            home = next(t for t in teams if t['homeAway'] == 'home')
+            away = next(t for t in teams if t['homeAway'] == 'away')
+            h_name, a_name = home['team']['displayName'], away['team']['displayName']
             status = event['status']['type']['state']
-
-            spread = 0
-            for game_odds in odds_data:
-                if h_name_full in game_odds.get('home_team', "") or h_short in game_odds.get('home_team', ""):
-                    if game_odds.get('bookmakers'):
-                        spread = game_odds['bookmakers'][0]['markets'][0]['outcomes'][0]['point']
+            
+            # Match Combined Odds
+            spread, h_win_prob = 0, 0.5
+            for game in odds_data:
+                if h_name in game['home_team'] or a_name in game['home_team']:
+                    # Extract spread
+                    spread_market = next((m for m in game['bookmakers'][0]['markets'] if m['key'] == 'spreads'), None)
+                    if spread_market:
+                        spread = spread_market['outcomes'][0]['point']
+                    # Extract moneyline for win prob
+                    ml_market = next((m for m in game['bookmakers'][0]['markets'] if m['key'] == 'h2h'), None)
+                    if ml_market:
+                        h_odds = ml_market['outcomes'][0]['price']
+                        h_win_prob = calculate_win_prob(h_odds)
                     break
 
-            def find_owner(name_to_match):
-                for key in INITIAL_MAP.keys():
-                    if key in name_to_match: return current_owners.get(key)
-                return "N/A"
-
-            h_owner, a_owner = find_owner(h_name_full), find_owner(a_name_full)
-
+            h_seed, a_seed = home.get('curatedRank', 'N/A'), away.get('curatedRank', 'N/A')
+            
             if status in ['pre', 'in']:
-                alive_teams.add(h_short)
-                alive_teams.add(a_short)
-                # Determine favorite based on spread
-                fav_text = f"Favorite: {h_name_full if spread < 0 else a_name_full}"
-                upcoming_games.append({
-                    "Matchup": f"{a_name_full} @ {h_name_full}",
-                    "Away Owner": a_owner,
-                    "Home Owner": h_owner,
-                    "Spread": f"{h_name_full} {spread}",
-                    "Status": event['status']['type']['shortDetail'],
-                    "Game Favorite": fav_text
+                upcoming.append({
+                    "Matchup": f"({a_seed}) {a_name} @ ({h_seed}) {h_name}",
+                    "Away Owner": current_owners.get(a_name, "N/A"),
+                    "Home Owner": current_owners.get(h_name, "N/A"),
+                    "Spread": f"{h_name} {spread}",
+                    "Win Prob": f"{h_name} {h_win_prob:.1%}",
+                    "Status": event['status']['type']['shortDetail']
                 })
 
             if status == 'post':
-                h_score, a_score = int(home.get('score', 0)), int(away.get('score', 0))
-                winner_short = h_short if h_score > a_score else a_short
-                new_owner = h_owner if (h_score + spread) > a_score else a_owner
-                winner_key = next((k for k in INITIAL_MAP.keys() if k in winner_short), winner_short)
+                h_score, a_score = int(home['score']), int(away['score'])
+                winner = h_name if h_score > a_score else a_name
+                new_owner = current_owners.get(h_name) if (h_score + spread) > a_score else current_owners.get(a_name)
                 
-                if current_owners.get(winner_key) != new_owner:
-                    takeover_logs.append(f"🔄 **{new_owner}** took over **{winner_short}**")
+                winner_key = next((k for k in INITIAL_MAP.keys() if k in winner), winner)
+                if current_owners[winner_key] != new_owner:
+                    takeover_logs.append(f"🔄 **{new_owner}** took over **{winner}** (Spread: {spread})")
                 current_owners[winner_key] = new_owner
-                alive_teams.add(winner_short)
         except Exception: continue
-    return current_owners, alive_teams, upcoming_games, takeover_logs
+    return current_owners, upcoming, takeover_logs
 
-# --- UI DISPLAY ---
-st.title("🏀 Sweet 16 Takeover Pool")
+# --- UI ---
+st.title("🏀 Sweet 16 Takeover: Live Odds Edition")
+st.caption(f"Scores update every 60s | Odds update every 15m")
 
 try:
-    s_json, o_json = get_live_data()
-    owners, alive, upcoming, logs = process_tournament(s_json, o_json)
+    scores_json = get_espn_scores()
+    odds_json = get_combined_odds(API_KEY)
+    owners, matches, logs = process_pool(scores_json, odds_json)
 
-    st.header("🕒 Upcoming Matchups", help="If the spread is negative (e.g., -5), that team is the favorite. If the underdog loses but covers that spread, their owner steals the winner's team!")
-    if upcoming:
-        st.dataframe(pd.DataFrame(upcoming), hide_index=True, use_container_width=True)
+    st.header("🕒 Matchups & Live Probabilities", 
+              help="Spread is for the Takeover rule. Win Prob is the live chance to win outright.")
+    st.dataframe(pd.DataFrame(matches), hide_index=True, use_container_width=True)
 
     st.divider()
-    col_a, col_b = st.columns(2)
-    
-    with col_a:
+    col1, col2 = st.columns(2)
+    with col1:
         st.header("✅ Owners Still Alive")
-        alive_data = []
+        alive_list = []
         for team, owner in owners.items():
-            if any(team in a_team for a_team in alive):
-                alive_data.append({
-                    "Owner": owner, 
-                    "Holding Team": team, 
-                    "Win Title %": WIN_PROBS.get(team, "0.1%")
-                })
+            # Check if team is still in an active or upcoming event
+            is_alive = any(team in e['name'] for e in scores_json.get('events', []) if e['status']['type']['state'] in ['pre', 'in'])
+            if is_alive:
+                alive_list.append({"Owner": owner, "Holding Team": team})
         
-        if alive_data:
-            df_alive = pd.DataFrame(alive_data)
+        if alive_list:
+            df_alive = pd.DataFrame(alive_list)
             df_alive.index = range(1, len(df_alive) + 1)
             st.table(df_alive)
+        else:
+            st.info("Tournament final stages pending...")
 
-    with col_b:
-        st.header("❌ Eliminated")
-        current_alive = set([d['Owner'] for d in alive_data])
-        eliminated = sorted(list(set(INITIAL_MAP.values()) - current_alive))
-        st.write(", ".join(eliminated) if eliminated else "None")
-
-    st.divider()
-    st.header("📜 Takeover History")
-    for log in logs: st.info(log)
+    with col2:
+        st.header("📜 Takeover Logs")
+        if logs:
+            for log in logs: st.info(log)
+        else:
+            st.write("No takeovers recorded yet.")
 
 except Exception as e:
     st.error(f"App Error: {e}")
