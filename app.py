@@ -17,13 +17,21 @@ INITIAL_MAP = {
     "St. John's": "Nick", "Nebraska": "Ken", "Alabama": "Burgess dude", "Duke": "Tom"
 }
 
+# --- THE BULLETPROOF REGION MAP ---
+# ESPN's API is flaky with region labels, so mapping them locally ensures 100% accuracy.
+# Adjust these if the bracket regions are slightly different!
+REGION_MAP = {
+    "Purdue": "Midwest", "Texas": "Midwest", "Tennessee": "Midwest", "Michigan State": "Midwest",
+    "Arizona": "West", "Arkansas": "West", "Iowa State": "West", "St. John's": "West",
+    "Houston": "South", "Illinois": "South", "Alabama": "South", "Duke": "South",
+    "UConn": "East", "Nebraska": "East", "Iowa": "East", "Michigan": "East"
+}
+
 @st.cache_data(ttl=60)
 def get_live_data():
-    # Attempt to fetch the entire 4-day weekend stretch
     primary_url = "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?dates=20260326-20260329&limit=100"
     scores = requests.get(primary_url).json()
     
-    # FALLBACK: If ESPN rejects the dates or returns empty, revert to the base live scoreboard
     if not scores.get('events'):
         backup_url = "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard"
         scores = requests.get(backup_url).json()
@@ -49,8 +57,8 @@ def process_pool(espn_data, odds_data):
     current_owners = INITIAL_MAP.copy()
     takeover_logs, match_list = [], []
     
-    # Pre-fill team info so the Owners table NEVER breaks, even if games aren't on the board yet
-    team_info = {team: {"Seed": "—", "Region": "TBD"} for team in INITIAL_MAP.keys()}
+    # Pre-fill team info using our Bulletproof Region Map
+    team_info = {team: {"Seed": "—", "Region": REGION_MAP.get(team, "Unknown")} for team in INITIAL_MAP.keys()}
     
     events = espn_data.get('events', [])
     for event in events:
@@ -58,15 +66,6 @@ def process_pool(espn_data, odds_data):
             competitions = event.get('competitions', [{}])[0]
             teams = competitions.get('competitors', [])
             if len(teams) < 2: continue
-            
-            # Extract Region from notes
-            region = "TBD"
-            for note in event.get('notes', []):
-                headline = note.get('headline', '')
-                for r in ['South', 'Midwest', 'East', 'West']:
-                    if r in headline:
-                        region = r
-                        break
             
             home = next(t for t in teams if t['homeAway'] == 'home')
             away = next(t for t in teams if t['homeAway'] == 'away')
@@ -78,9 +77,9 @@ def process_pool(espn_data, odds_data):
             
             h_seed, a_seed = extract_seed(home), extract_seed(away)
             
-            # Update the pre-filled dictionary with actual live data
-            if h_key in team_info: team_info[h_key] = {"Seed": h_seed, "Region": region}
-            if a_key in team_info: team_info[a_key] = {"Seed": a_seed, "Region": region}
+            # Update only the seed dynamically, rely on REGION_MAP for the region
+            if h_key in team_info: team_info[h_key]["Seed"] = h_seed
+            if a_key in team_info: team_info[a_key]["Seed"] = a_seed
             
             h_score, a_score = int(home.get('score', 0)), int(away.get('score', 0))
             status = event['status']['type']['state']
@@ -148,7 +147,7 @@ try:
         st.header("✅ Owners Still Alive")
         alive_data = []
         for team, owner in owners.items():
-            info = team_info.get(team, {"Region": "TBD", "Seed": "—"})
+            info = team_info.get(team, {"Region": "Unknown", "Seed": "—"})
             alive_data.append({
                 "Region": info["Region"],
                 "Seed": info["Seed"],
@@ -158,6 +157,7 @@ try:
             
         df_alive = pd.DataFrame(alive_data)
         df_alive['SeedSort'] = pd.to_numeric(df_alive['Seed'], errors='coerce').fillna(99)
+        # Groups by Region (East, Midwest, South, West), then sorts 1-16 within the region
         df_alive = df_alive.sort_values(by=["Region", "SeedSort"]).drop(columns=['SeedSort'])
         
         st.dataframe(df_alive, hide_index=True, use_container_width=True)
