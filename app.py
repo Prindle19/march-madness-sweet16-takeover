@@ -58,11 +58,8 @@ def get_probs(h_score, a_score, status, ml):
     return (round(h_p, 1), round(100 - h_p, 1))
 
 def process_pool(espn_data):
-    # This dictionary tracks the current status and message for every ORIGINAL owner
     owner_tracking = {v: {"Status": "Alive", "Msg": "", "OriginalTeam": k} for k, v in INITIAL_MAP.items()}
-    # This tracks who currently holds which advancing team
     pool_state = {k: v for k, v in INITIAL_MAP.items()}
-    
     takeover_logs, match_list = [], []
     live_odds = get_live_odds()
     now_et = pd.Timestamp.utcnow().tz_convert('America/New_York')
@@ -111,25 +108,17 @@ def process_pool(espn_data):
                 home_covered = (h_score + spread) > a_score
                 orig_h_owner, orig_a_owner = INITIAL_MAP[h_key], INITIAL_MAP[a_key]
                 
-                # Logic for current team holder
                 if home_covered:
-                    # Favorite Covered OR Underdog failed to beat spread
                     pool_state[su_winner] = orig_h_owner
                     owner_tracking[orig_a_owner]["Status"] = "Eliminated"
-                    if h_score > a_score:
-                        owner_tracking[orig_a_owner]["Msg"] = "Eliminated (Lost Game & Spread)"
-                    else:
-                        owner_tracking[orig_a_owner]["Msg"] = "Eliminated (Won Game, Lost Team)"
-                        takeover_logs.append(f"🛡️ **{orig_h_owner}** saved **{h_key}** via spread.")
+                    owner_tracking[orig_a_owner]["Msg"] = "Eliminated (Won Game, Lost Team)" if a_score > h_score else "Eliminated (Lost Game & Spread)"
+                    if h_score < a_score:
+                        takeover_logs.append(f"🛡️ **{orig_h_owner}** used the spread to save **{h_key}**.")
                 else:
-                    # Takeover happened
                     pool_state[su_winner] = orig_a_owner
                     owner_tracking[orig_h_owner]["Status"] = "Eliminated"
-                    if h_score > a_score:
-                        owner_tracking[orig_h_owner]["Msg"] = "Eliminated (Won Game, Lost Spread)"
-                    else:
-                        owner_tracking[orig_h_owner]["Msg"] = "Eliminated (Lost Straight Up)"
-                    takeover_logs.append(f"🔄 **{orig_a_owner}** TOOK OVER the **{su_winner}** from **{orig_h_owner}**!")
+                    owner_tracking[orig_h_owner]["Msg"] = "Eliminated (Won Game, Lost Spread)" if h_score > a_score else "Eliminated (Lost Straight Up)"
+                    takeover_logs.append(f"🔄 **{orig_a_owner}** TOOK OVER **{su_winner}** from **{orig_h_owner}**")
 
             h_p, a_p = get_probs(h_score, a_score, short_detail, ml)
             lock_info = f" (DK @ {pd.to_datetime(last_update).tz_convert('America/New_York').strftime('%I:%M %p')})" if is_locked and last_update else ""
@@ -154,32 +143,21 @@ st.dataframe(pd.DataFrame(matches), hide_index=True, use_container_width=True)
 col1, col2 = st.columns([1.5, 1])
 with col1:
     st.header("✅ Owners Still Alive")
-    # Identify who currently has a team still in the mix
     alive_rows = []
-    # Only show teams that are actually "Alive" in the bracket
-    alive_teams = [m['Matchup'] for m in matches if 'Final' not in m['Status']]
-    # For finished games, the 'su_winner' is the one we track
     for team, owner in pool_holders.items():
-        # Check if the team is still in the real tournament or just finished winning its slot
-        is_eliminated = any(team.lower() in m['Matchup'].lower() and 'Final' in m['Status'] and team.lower() not in m['Score'] for m in matches)
-        # Check if the team is the winner of a Final game
         is_winner = any(team.lower() in m['Matchup'].lower() and 'Final' in m['Status'] and 
                         ((team.lower() in m['Matchup'].split('@')[1].lower() and int(m['Score'].split('-')[1]) > int(m['Score'].split('-')[0])) or
                          (team.lower() in m['Matchup'].split('@')[0].lower() and int(m['Score'].split('-')[0]) > int(m['Score'].split('-')[1])))
                         for m in matches)
-        
         if is_winner or not any(team.lower() in m['Matchup'].lower() and 'Final' in m['Status'] for m in matches):
              alive_rows.append({"Region": TEAM_INFO[team]["Region"], "Seed": TEAM_INFO[team]["Seed"], "Owner": owner, "Advancing Team": team})
-
     st.dataframe(pd.DataFrame(alive_rows).sort_values(["Region", "Seed"]), hide_index=True, use_container_width=True)
 
 with col2:
     st.header("💀 Eliminated Owners")
-    # Owners are only dead if they hold 0 teams in the alive_rows
     current_alive = [r['Owner'] for r in alive_rows]
     dead_rows = [{"Owner": name, "Original Team": data["OriginalTeam"], "Status": data["Msg"]} 
                  for name, data in owner_stats.items() if name not in current_alive and data["Status"] == "Eliminated"]
-    
     if dead_rows:
         st.dataframe(pd.DataFrame(dead_rows), hide_index=True, use_container_width=True)
     
@@ -187,10 +165,10 @@ with col2:
     for log in logs: st.info(log)
 
 st.divider()
-st.subheader("📚 Status Key (The Rules)")
+st.subheader("Elimination Key ☠️")
 st.write("""
-- **Eliminated (Won Game, Lost Spread):** Your team won, but they failed to cover. You lost the team to the underdog owner.
-- **Eliminated (Won Game, Lost Team):** Your underdog won the game, but didn't beat the spread. The favorite owner keeps the spot.
-- **Eliminated (Lost Straight Up):** Your favorite lost the game and failed to cover the spread.
-- **Eliminated (Lost Game & Spread):** Your underdog lost the game and failed to cover the spread.
+- **Won Game, Lost Spread:** Your team won, but failed to cover. You lose the team to the underdog owner.
+- **Won Game, Lost Team:** Your underdog won the game, but didn't beat the spread. The favorite owner keeps the spot.
+- **Lost Straight Up:** Your favorite lost the game and failed to cover the spread.
+- **Lost Game & Spread:** Your underdog lost the game and failed to cover the spread.
 """)
