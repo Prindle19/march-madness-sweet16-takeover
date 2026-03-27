@@ -9,7 +9,7 @@ HISTORICAL_ODDS_URL = "https://api.the-odds-api.com/v4/historical/sports/basketb
 
 st.set_page_config(page_title="Sweet 16 Takeover", page_icon="🏀", layout="wide")
 
-# --- INITIAL HAT PULL (Source of Truth) ---
+# --- INITIAL HAT PULL ---
 INITIAL_MAP = {
     "Michigan": "Greg Doc", "Houston": "Ryan Doc", "UConn": "Joe Doc", "Michigan State": "DOB",
     "Texas": "Schroller", "Tennessee": "Jimmy A", "Purdue": "Jim Henry", "Iowa": "EJ",
@@ -47,17 +47,18 @@ def get_historical_odds(target_utc_date):
     return requests.get(HISTORICAL_ODDS_URL, params=params).json()
 
 def get_probs(h_score, a_score, status, ml):
-    if status == "Final":
-        return ("100%", "0%") if h_score > a_score else ("0%", "100%")
-    # Simple probability from moneyline
-    prob = (100 / (ml + 100)) if ml > 0 else (abs(ml) / (abs(ml) + 100))
-    # Adjust for live score (simplified)
-    if h_score != a_score:
-        diff = (h_score - a_score) * 0.05
-        prob = max(0.01, min(0.99, prob + diff))
-    return (f"{prob:.1%}", f"{1-prob:.1%}")
+    if "Final" in status:
+        return (100, 0) if h_score > a_score else (0, 100)
+    base = (100 / (ml + 100)) if ml > 0 else (abs(ml) / (abs(ml) + 100))
+    if h_score == 0 and a_score == 0:
+        h_p = base * 100
+    else:
+        diff = (h_score - a_score) * 0.04
+        h_p = max(0.01, min(0.99, base + diff)) * 100
+    return (round(h_p, 1), round(100 - h_p, 1))
 
 def process_pool(espn_data):
+    # Tracks the current owner of every team remaining in the bracket
     pool_state = {k: {"Owner": v, "Status": "Alive", "Msg": ""} for k, v in INITIAL_MAP.items()}
     takeover_logs, match_list = [], []
     live_odds = get_live_odds()
@@ -113,23 +114,26 @@ def process_pool(espn_data):
                 if home_covered:
                     pool_state[su_winner]["Owner"] = orig_h_owner
                     pool_state[su_loser]["Status"] = "Eliminated"
-                    pool_state[su_loser]["Msg"] = "Lost Straight Up"
-                    if h_score < a_score: # Fav lost game but covered
-                        takeover_logs.append(f"🛡️ **{orig_h_owner}** used the spread to save **{h_key}**")
+                    if h_score < a_score: # Favorite survived upset via spread
+                        pool_state[su_loser]["Msg"] = "Eliminated (Won Game, Lost Team)"
+                        takeover_logs.append(f"🛡️ **{orig_h_owner}** saved **{h_key}** via the spread.")
+                    else:
+                        pool_state[su_loser]["Msg"] = "Knocked Out (Lost Game & Spread)"
                 else:
+                    # Takeover
                     pool_state[su_winner]["Owner"] = orig_a_owner
                     pool_state[su_loser]["Status"] = "Eliminated"
-                    pool_state[su_loser]["Msg"] = f"Taken over by {orig_a_owner}"
-                    takeover_logs.append(f"🔄 **{orig_a_owner}** TOOK OVER **{orig_h_owner}'s** spot!")
+                    pool_state[su_loser]["Msg"] = "Knocked Out (Spread)"
+                    takeover_logs.append(f"🔄 **{orig_a_owner}** TOOK OVER the **{su_winner}** position from **{orig_h_owner}**!")
 
-            h_prob, a_prob = get_probs(h_score, a_score, short_detail, ml)
+            h_p, a_p = get_probs(h_score, a_score, short_detail, ml)
             lock_info = f" (DK @ {pd.to_datetime(last_update).tz_convert('America/New_York').strftime('%I:%M %p')})" if is_locked and last_update else ""
             match_list.append({
                 "Matchup": f"({TEAM_INFO[a_key]['Seed']}) {a_name} @ ({TEAM_INFO[h_key]['Seed']}) {h_name}",
                 "Status": short_detail,
                 "Score": f"{a_score} - {h_score}",
                 "Spread": f"{'🔒 ' if is_locked else ''}{h_name} {spread}{lock_info}",
-                "Win Prob": f"{h_name} {h_prob} / {a_name} {a_prob}"
+                "Win Prob": f"{h_name} {h_p}% / {a_name} {a_p}%"
             })
         except: continue
     return pool_state, match_list, takeover_logs
@@ -145,24 +149,29 @@ st.dataframe(pd.DataFrame(matches), hide_index=True, use_container_width=True)
 col1, col2 = st.columns([1.5, 1])
 with col1:
     st.header("✅ Owners Still Alive")
-    alive_rows = [{"Region": TEAM_INFO[t]["Region"], "Seed": TEAM_INFO[t]["Seed"], "Owner": d["Owner"], "Tournament Spot": t} 
+    alive_rows = [{"Region": TEAM_INFO[t]["Region"], "Seed": TEAM_INFO[t]["Seed"], "Owner": d["Owner"], "Advancing Team": t} 
                   for t, d in pool_data.items() if d["Status"] == "Alive"]
-    st.dataframe(pd.DataFrame(alive_rows).sort_values(["Region", "Seed"]), hide_index=True, use_container_width=True)
+    if alive_rows:
+        st.dataframe(pd.DataFrame(alive_rows).sort_values(["Region", "Seed"]), hide_index=True, use_container_width=True)
 
 with col2:
     st.header("💀 Eliminated Owners")
-    # Find anyone who doesn't exist in the current 'Owner' list of Alive teams
-    current_owners = [d["Owner"] for d in pool_data.values() if d["Status"] == "Alive"]
+    alive_list = [d["Owner"] for d in pool_data.values() if d["Status"] == "Alive"]
     dead_rows = []
-    for team, data in pool_data.items():
-        original_owner = INITIAL_MAP[team]
-        if original_owner not in current_owners:
-            # Avoid duplicate rows for the same owner if they haven't already been added
-            if not any(r['Owner'] == original_owner for r in dead_rows):
-                dead_rows.append({"Owner": original_owner, "Original Team": team, "Status": data["Msg"] if data["Status"] == "Eliminated" else "Knocked Out"})
+    for team_name, team_data in pool_data.items():
+        orig_owner = INITIAL_MAP[team_name]
+        if orig_owner not in alive_list:
+            if not any(r['Owner'] == orig_owner for r in dead_rows):
+                status_msg = team_data["Msg"] if team_data["Status"] == "Eliminated" else "Knocked Out"
+                dead_rows.append({"Owner": orig_owner, "Original Team": team_name, "Status": status_msg})
 
     if dead_rows:
         st.dataframe(pd.DataFrame(dead_rows), hide_index=True, use_container_width=True)
+    else:
+        st.write("No one eliminated yet.")
     
     st.header("📜 Takeover History")
-    for log in logs: st.info(log)
+    if logs:
+        for log in logs: st.info(log)
+    else:
+        st.write("No takeovers recorded yet.")
