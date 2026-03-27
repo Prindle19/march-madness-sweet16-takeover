@@ -111,13 +111,13 @@ def process_pool(espn_data):
                 if home_covered:
                     pool_state[su_winner] = orig_h_owner
                     owner_tracking[orig_a_owner]["Status"] = "Eliminated"
-                    owner_tracking[orig_a_owner]["Msg"] = "Eliminated (Won Game, Lost Team)" if a_score > h_score else "Eliminated (Lost Game & Spread)"
+                    owner_tracking[orig_a_owner]["Msg"] = "Won Game, Lost Team" if a_score > h_score else "Lost Game & Spread"
                     if h_score < a_score:
                         takeover_logs.append(f"🛡️ **{orig_h_owner}** used the spread to save **{h_key}**.")
                 else:
                     pool_state[su_winner] = orig_a_owner
                     owner_tracking[orig_h_owner]["Status"] = "Eliminated"
-                    owner_tracking[orig_h_owner]["Msg"] = "Eliminated (Won Game, Lost Spread)" if h_score > a_score else "Eliminated (Lost Straight Up)"
+                    owner_tracking[orig_h_owner]["Msg"] = "Won Game, Lost Spread" if h_score > a_score else "Lost Straight Up"
                     takeover_logs.append(f"🔄 **{orig_a_owner}** TOOK OVER **{su_winner}** from **{orig_h_owner}**")
 
             h_p, a_p = get_probs(h_score, a_score, short_detail, ml)
@@ -165,7 +165,7 @@ with col2:
     for log in logs: st.info(log)
 
 st.divider()
-st.subheader("Elimination Key ☠️")
+st.subheader("💀 Elimination Key")
 st.write("""
 - **Won Game, Lost Spread:** Your team won, but failed to cover. You lose the team to the underdog owner.
 - **Won Game, Lost Team:** Your underdog won the game, but didn't beat the spread. The favorite owner keeps the spot.
