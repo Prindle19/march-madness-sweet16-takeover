@@ -46,6 +46,17 @@ def get_historical_odds(target_utc_date):
     params = {'apiKey': ODDS_API_KEY, 'regions': 'us', 'markets': 'spreads,h2h', 'bookmakers': 'draftkings', 'oddsFormat': 'american', 'date': target_utc_date}
     return requests.get(HISTORICAL_ODDS_URL, params=params).json()
 
+def get_probs(h_score, a_score, status, ml):
+    if "Final" in status:
+        return (100, 0) if h_score > a_score else (0, 100)
+    base = (100 / (ml + 100)) if ml > 0 else (abs(ml) / (abs(ml) + 100))
+    if h_score == 0 and a_score == 0:
+        h_p = base * 100
+    else:
+        diff = (h_score - a_score) * 0.04
+        h_p = max(0.01, min(0.99, base + diff)) * 100
+    return (round(h_p, 1), round(100 - h_p, 1))
+
 def process_pool(espn_data):
     owner_tracking = {v: {"Status": "Alive", "Msg": "", "OriginalTeam": k} for k, v in INITIAL_MAP.items()}
     pool_state = {k: v for k, v in INITIAL_MAP.items()}
@@ -67,7 +78,7 @@ def process_pool(espn_data):
             h_key = next((k for k in INITIAL_MAP.keys() if k.lower() in h_name.lower()), h_name)
             a_key = next((k for k in INITIAL_MAP.keys() if k.lower() in a_name.lower()), a_name)
             
-            spread, last_update = 0, None
+            spread, ml, last_update = 0, 0, None
             odds_to_search = live_odds
             if is_locked:
                 lock_str = game_time_et.replace(hour=16, minute=0, second=0).tz_convert('UTC').strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -83,21 +94,24 @@ def process_pool(espn_data):
                     last_update = m_spreads['last_update']
                     for out in m_spreads['outcomes']:
                         if n_h in normalize(out['name']): spread = float(out['point'])
+                    m_h2h = next(m for m in market if m['key'] == 'h2h')
+                    for out in m_h2h['outcomes']:
+                        if n_h in normalize(out['name']): ml = float(out['price'])
                     break
 
             status = event['status']['type']['state']
             short_detail = event['status']['type']['shortDetail']
             h_score, a_score = int(home.get('score', 0)), int(away.get('score', 0))
             
-            # --- LIVE COVERAGE LOGIC ---
-            # DK line is always shown relative to Home Team
+            # Live Elimination Logic
             h_diff = (h_score + spread) - a_score
-            if h_diff > 0:
-                live_cover = f"✅ {h_key} ({INITIAL_MAP[h_key]})"
-            elif h_diff < 0:
-                live_cover = f"✅ {a_key} ({INITIAL_MAP[a_key]})"
+            if h_score + a_score > 0:
+                if h_diff > 0: # Home currently covers
+                    elim_status = f"✅ {h_key} Covering" if h_score > a_score else f"🛡️ {h_key} Surviving"
+                else: # Away currently covers
+                    elim_status = f"🔄 {a_key} Taking Over" if h_score > a_score else f"✅ {a_key} Dominating"
             else:
-                live_cover = "PUSH"
+                elim_status = "TBD"
 
             if status == 'post':
                 su_winner, su_loser = (h_key, a_key) if h_score > a_score else (a_key, h_key)
@@ -114,12 +128,14 @@ def process_pool(espn_data):
                     owner_tracking[orig_h_owner]["Msg"] = "Won Game, Lost Spread" if h_score > a_score else "Lost Straight Up"
                     takeover_logs.append(f"🔄 **{orig_a_owner}** TOOK OVER **{su_winner}** from **{orig_h_owner}**")
 
+            h_p, a_p = get_probs(h_score, a_score, short_detail, ml)
             match_list.append({
                 "Matchup": f"{a_name} @ {h_name}",
                 "Status": short_detail,
                 "Score": f"{a_score} - {h_score}",
                 "Line": f"{h_name} {spread}",
-                "Currently Covering": live_cover if h_score + a_score > 0 else "TBD"
+                "Win Prob": f"{h_name} {h_p}% / {a_name} {a_p}%",
+                "Elimination Status": elim_status
             })
         except: continue
     return pool_state, owner_tracking, match_list, takeover_logs
@@ -130,7 +146,6 @@ scores = get_espn_scores()
 pool_holders, owner_stats, matches, logs = process_pool(scores)
 
 st.header("🕒 Live Matchups & Coverage")
-# Simplified the columns to save horizontal space
 st.dataframe(pd.DataFrame(matches), hide_index=True, use_container_width=True)
 
 col1, col2 = st.columns([1.5, 1])
