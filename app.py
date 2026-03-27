@@ -1,6 +1,7 @@
 import streamlit as st
 import requests
 import pandas as pd
+import numpy as np
 
 # --- SECRETS & API CONFIG ---
 ODDS_API_KEY = st.secrets.get("API_KEY", "MISSING_KEY")
@@ -9,7 +10,7 @@ HISTORICAL_ODDS_URL = "https://api.the-odds-api.com/v4/historical/sports/basketb
 
 st.set_page_config(page_title="Sweet 16 Takeover", page_icon="🏀", layout="wide")
 
-# --- INITIAL HAT PULL (The Source of Truth) ---
+# --- INITIAL HAT PULL ---
 INITIAL_MAP = {
     "Michigan": "Greg Doc", "Houston": "Ryan Doc", "UConn": "Joe Doc", "Michigan State": "DOB",
     "Texas": "Schroller", "Tennessee": "Jimmy A", "Purdue": "Jim Henry", "Iowa": "EJ",
@@ -46,16 +47,22 @@ def get_historical_odds(target_utc_date):
     params = {'apiKey': ODDS_API_KEY, 'regions': 'us', 'markets': 'spreads,h2h', 'bookmakers': 'draftkings', 'oddsFormat': 'american', 'date': target_utc_date}
     return requests.get(HISTORICAL_ODDS_URL, params=params).json()
 
-def calculate_win_prob(odds):
-    if odds == 0: return 0.50
-    return (100 / (odds + 100)) if odds > 0 else (abs(odds) / (abs(odds) + 100))
+def calculate_live_prob(h_score, a_score, status_detail, pregame_ml):
+    if "Final" in status_detail:
+        return 1.0 if h_score > a_score else 0.0
+    
+    # Simple logic: start with betting market prob, adjust by current lead
+    base_prob = (100 / (pregame_ml + 100)) if pregame_ml > 0 else (abs(pregame_ml) / (abs(pregame_ml) + 100))
+    if h_score == 0 and a_score == 0: return base_prob
+    
+    score_diff = h_score - a_score
+    # In-game weight: as the game progresses, current score matters more than opening line
+    live_prob = base_prob + (score_diff * 0.05) 
+    return max(0.01, min(0.99, live_prob))
 
 def process_pool(espn_data):
-    # Tracks the current owner and status of every bracket position
     pool_state = {k: {"Owner": v, "Status": "Alive", "Message": ""} for k, v in INITIAL_MAP.items()}
-    takeover_logs = []
-    match_list = []
-    
+    takeover_logs, match_list = [], []
     live_odds = get_live_odds()
     now_et = pd.Timestamp.utcnow().tz_convert('America/New_York')
     
@@ -96,39 +103,38 @@ def process_pool(espn_data):
                     break
 
             status = event['status']['type']['state']
+            status_detail = event['status']['type']['shortDetail']
             h_score, a_score = int(home.get('score', 0)), int(away.get('score', 0))
             
             if status == 'post':
                 su_winner_key = h_key if h_score > a_score else a_key
                 su_loser_key = a_key if h_score > a_score else h_key
-                
-                # Takeover Logic Check
                 home_covered = (h_score + spread) > a_score
-                orig_h_owner = INITIAL_MAP[h_key]
-                orig_a_owner = INITIAL_MAP[a_key]
+                
+                orig_h_owner, orig_a_owner = INITIAL_MAP[h_key], INITIAL_MAP[a_key]
                 
                 if home_covered:
-                    # Favorite Covered
                     pool_state[su_winner_key]["Owner"] = orig_h_owner
                     pool_state[su_loser_key]["Status"] = "Eliminated"
-                    pool_state[su_loser_key]["Message"] = "Lost Straight Up"
-                    if h_score < a_score: # Favorite lost game but survived via spread
-                        takeover_logs.append(f"🛡️ **{orig_h_owner}** survived with **{h_key}** via the spread.")
+                    pool_state[su_loser_key]["Message"] = "Knocked Out"
+                    if h_score < a_score:
+                        takeover_logs.append(f"🛡️ **{orig_h_owner}** survived with **{h_key}** via spread.")
                 else:
-                    # Underdog Beat the Spread! Takeover.
                     pool_state[su_winner_key]["Owner"] = orig_a_owner
                     pool_state[su_loser_key]["Status"] = "Eliminated"
-                    pool_state[su_loser_key]["Message"] = "Knocked Out (Lost Spread)"
+                    pool_state[su_loser_key]["Message"] = f"Taken over by {orig_a_owner}"
                     takeover_logs.append(f"🔄 **{orig_a_owner}** TOOK OVER the **{su_winner_key}** spot!")
 
-            # Matchup Table
-            lock_info = f" (DraftKings @ {pd.to_datetime(last_update).tz_convert('America/New_York').strftime('%I:%M %p')})" if is_locked and last_update else ""
+            # Live Prob Calculation
+            live_win_prob = calculate_live_prob(h_score, a_score, status_detail, ml)
+            
+            lock_info = f" (DK @ {pd.to_datetime(last_update).tz_convert('America/New_York').strftime('%I:%M %p')})" if is_locked and last_update else ""
             match_list.append({
                 "Matchup": f"({TEAM_INFO[a_key]['Seed']}) {a_name} @ ({TEAM_INFO[h_key]['Seed']}) {h_name}",
-                "Status": event['status']['type']['shortDetail'],
+                "Status": status_detail,
                 "Score": f"{a_score} - {h_score}",
                 "Spread": f"{'🔒 ' if is_locked else ''}{h_name} {spread}{lock_info}",
-                "Win Prob": f"{h_name} {calculate_win_prob(ml):.1%}",
+                "Win Prob": f"{h_name} {live_win_prob:.1%}"
             })
         except: continue
     return pool_state, match_list, takeover_logs
@@ -146,18 +152,20 @@ with col1:
     st.header("✅ Owners Still Alive")
     alive = [{"Region": TEAM_INFO[t]["Region"], "Seed": TEAM_INFO[t]["Seed"], "Owner": d["Owner"], "Tournament Spot": t} 
              for t, d in pool_data.items() if d["Status"] == "Alive"]
-    if alive:
-        st.dataframe(pd.DataFrame(alive).sort_values(["Region", "Seed"]), hide_index=True, use_container_width=True)
+    st.dataframe(pd.DataFrame(alive).sort_values(["Region", "Seed"]), hide_index=True, use_container_width=True)
 
 with col2:
     st.header("💀 Eliminated Owners")
-    dead = [{"Owner": INITIAL_MAP[t], "Original Team": t, "Status": d["Message"]} 
-            for t, d in pool_data.items() if d["Status"] == "Eliminated"]
-    if dead:
-        st.dataframe(pd.DataFrame(dead), hide_index=True, use_container_width=True)
+    # Only show owners who no longer hold ANY tournament spots
+    alive_owners = [d["Owner"] for d in pool_data.values() if d["Status"] == "Alive"]
+    dead_owners = []
+    for team, data in pool_data.items():
+        orig_owner = INITIAL_MAP[team]
+        if data["Status"] == "Eliminated" and orig_owner not in alive_owners:
+            dead_owners.append({"Owner": orig_owner, "Lost Team": team, "Status": data["Message"]})
+    
+    if dead_owners:
+        st.dataframe(pd.DataFrame(dead_owners), hide_index=True, use_container_width=True)
     
     st.header("📜 Takeover History")
-    if logs:
-        for log in logs: st.info(log)
-    else:
-        st.write("No takeovers recorded yet.")
+    for log in logs: st.info(log)
