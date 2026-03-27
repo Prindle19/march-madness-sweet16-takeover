@@ -9,7 +9,7 @@ HISTORICAL_ODDS_URL = "https://api.the-odds-api.com/v4/historical/sports/basketb
 
 st.set_page_config(page_title="Sweet 16 Takeover", page_icon="🏀", layout="wide")
 
-# --- INITIAL HAT PULL ---
+# --- INITIAL HAT PULL (The Original Owners) ---
 INITIAL_MAP = {
     "Michigan": "Greg Doc", "Houston": "Ryan Doc", "UConn": "Joe Doc", "Michigan State": "DOB",
     "Texas": "Schroller", "Tennessee": "Jimmy A", "Purdue": "Jim Henry", "Iowa": "EJ",
@@ -103,23 +103,28 @@ def process_pool(espn_data):
             h_score, a_score = int(home.get('score', 0)), int(away.get('score', 0))
             
             if status == 'post':
-                su_winner = h_key if h_score > a_score else a_key
-                su_loser = a_key if h_score > a_score else h_key
+                su_winner, su_loser = (h_key, a_key) if h_score > a_score else (a_key, h_key)
                 home_covered = (h_score + spread) > a_score
                 orig_h_owner, orig_a_owner = INITIAL_MAP[h_key], INITIAL_MAP[a_key]
                 
+                # --- SCENARIO 1: FAVORITE COVERS ---
                 if home_covered:
                     pool_state[su_winner]["Owner"] = orig_h_owner
                     pool_state[su_loser]["Status"] = "Eliminated"
-                    if h_score < a_score:
+                    if h_score > a_score:
+                        pool_state[su_loser]["Msg"] = "Eliminated (Lost Game & Spread)"
+                    else: # Favorite lost game but covered spread (The Shield)
                         pool_state[su_loser]["Msg"] = "Eliminated (Won Game, Lost Team)"
-                        takeover_logs.append(f"🛡️ **{orig_h_owner}** used the spread to survive with **{h_key}**.")
-                    else:
-                        pool_state[su_loser]["Msg"] = "Knocked Out (Lost Game & Spread)"
+                        takeover_logs.append(f"🛡️ **{orig_h_owner}** saved **{h_key}** via the spread.")
+                
+                # --- SCENARIO 2: UNDERDOG COVERS (TAKEOVER) ---
                 else:
                     pool_state[su_winner]["Owner"] = orig_a_owner
                     pool_state[su_loser]["Status"] = "Eliminated"
-                    pool_state[su_loser]["Msg"] = "Knocked Out (Spread)"
+                    if h_score > a_score: # Fav won game but failed spread (Jim Henry)
+                        pool_state[su_loser]["Msg"] = "Eliminated (Won Game, Lost Spread)"
+                    else: # Fav lost game and failed spread (Ken)
+                        pool_state[su_loser]["Msg"] = "Eliminated (Lost Straight Up)"
                     takeover_logs.append(f"🔄 **{orig_a_owner}** TOOK OVER the **{su_winner}** from **{orig_h_owner}**!")
 
             h_p, a_p = get_probs(h_score, a_score, short_detail, ml)
@@ -160,11 +165,19 @@ with col2:
         orig_owner = INITIAL_MAP[team_name]
         if orig_owner not in alive_list:
             if not any(r['Owner'] == orig_owner for r in dead_rows):
-                status_msg = team_data["Msg"] if team_data["Status"] == "Eliminated" else "Knocked Out"
-                dead_rows.append({"Owner": orig_owner, "Original Team": team_name, "Status": status_msg})
+                dead_rows.append({"Owner": orig_owner, "Original Team": team_name, "Status": team_data["Msg"]})
 
     if dead_rows:
         st.dataframe(pd.DataFrame(dead_rows), hide_index=True, use_container_width=True)
     
     st.header("📜 Takeover History")
     for log in logs: st.info(log)
+
+st.divider()
+st.subheader("📚 Status Key (The Rules)")
+st.write("""
+- **Eliminated (Won Game, Lost Spread):** Your team won the game, but they failed to cover the DraftKings line. You lose your team to the underdog owner.
+- **Eliminated (Won Game, Lost Team):** You had the underdog and actually won the basketball game, but because you didn't beat the spread, the original favorite owner keeps the advancing spot.
+- **Eliminated (Lost Straight Up):** Your favorite lost the game and failed to cover the spread.
+- **Eliminated (Lost Game & Spread):** Your underdog lost the game and failed to cover the spread.
+""")
