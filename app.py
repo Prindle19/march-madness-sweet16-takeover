@@ -1,6 +1,6 @@
 import streamlit as st
 import requests
-import pd
+import pandas as pd
 
 # --- SECRETS & API CONFIG ---
 ODDS_API_KEY = st.secrets.get("API_KEY", "5a5871e7cd461a9cbfca1cbb28efd7ee")
@@ -9,7 +9,7 @@ HISTORICAL_ODDS_URL = "https://api.the-odds-api.com/v4/historical/sports/basketb
 
 st.set_page_config(page_title="Sweet 16 Takeover", page_icon="🏀", layout="wide")
 
-# --- INITIAL HAT PULL (The Source of Truth) ---
+# --- INITIAL HAT PULL ---
 INITIAL_MAP = {
     "Michigan": "Greg Doc", "Houston": "Ryan Doc", "UConn": "Joe Doc", "Michigan State": "DOB",
     "Texas": "Schroller", "Tennessee": "Jimmy A", "Purdue": "Jim Henry", "Iowa": "EJ",
@@ -113,7 +113,7 @@ def process_pool(espn_data):
                     pool_state[su_loser]["Status"] = "Eliminated"
                     if h_score < a_score:
                         pool_state[su_loser]["Msg"] = "Eliminated (Won Game, Lost Team)"
-                        takeover_logs.append(f"🛡️ **{orig_h_owner}** used the spread to save **{h_key}**.")
+                        takeover_logs.append(f"🛡️ **{orig_h_owner}** used the spread to survive with **{h_key}**.")
                     else:
                         pool_state[su_loser]["Msg"] = "Knocked Out (Lost Game & Spread)"
                 else:
