@@ -102,14 +102,26 @@ def process_pool(espn_data):
             status = event['status']['type']['state']
             short_detail = event['status']['type']['shortDetail']
             h_score, a_score = int(home.get('score', 0)), int(away.get('score', 0))
-            
+            is_final = "Final" in short_detail
+
             # Live Elimination Logic
             h_diff = (h_score + spread) - a_score
+            ingame_tense = "Taking Over" if not is_final else "Took Over"
+            ingame_shield = "Surviving" if not is_final else "Survived"
+            ingame_dom = "Dominating" if not is_final else "Won"
+
             if h_score + a_score > 0:
                 if h_diff > 0: # Home currently covers
-                    elim_status = f"✅ {h_key} Covering" if h_score > a_score else f"🛡️ {h_key} Surviving"
+                    # Home is Favorite
+                    if h_score > a_score:
+                        elim_status = f"✅ {h_key} ({INITIAL_MAP[h_key]}) {ingame_dom}"
+                    else: # Home is losing but covering
+                        elim_status = f"🛡️ {h_key} ({INITIAL_MAP[h_key]}) {ingame_shield}"
                 else: # Away currently covers
-                    elim_status = f"🔄 {a_key} Taking Over" if h_score > a_score else f"✅ {a_key} Dominating"
+                    if h_score > a_score: # Underdog is losing but covering (Taking over)
+                        elim_status = f"🔄 {a_key} ({INITIAL_MAP[a_key]}) {ingame_tense}"
+                    else: # Underdog is winning straight up
+                        elim_status = f"✅ {a_key} ({INITIAL_MAP[a_key]}) {ingame_dom}"
             else:
                 elim_status = "TBD"
 
