@@ -9,7 +9,7 @@ LIVE_ODDS_URL = "https://api.the-odds-api.com/v4/sports/basketball_ncaab/odds/"
 
 st.set_page_config(page_title="Sweet 16 Takeover", page_icon="🏀", layout="wide")
 
-# --- INITIAL HAT PULL (The Permanent Record) ---
+# --- INITIAL HAT PULL (The Original Owners) ---
 INITIAL_MAP = {
     "Michigan": "Greg Doc", "Houston": "Ryan Doc", "UConn": "Joe Doc", "Michigan State": "DOB",
     "Texas": "Schroller", "Tennessee": "Jimmy A", "Purdue": "Jim Henry", "Iowa": "EJ",
@@ -17,7 +17,7 @@ INITIAL_MAP = {
     "St. John's": "Nick", "Nebraska": "Ken", "Alabama": "Burgess dude", "Duke": "Tom"
 }
 
-# Strict metadata for identification
+# Strict metadata for identification - THIS PREVENTS THE "STATE" CONFUSION
 TEAM_INFO = {
     "Michigan": {"Seed": 1, "Region": "Midwest"}, "Houston": {"Seed": 2, "Region": "South"},
     "UConn": {"Seed": 2, "Region": "East"}, "Michigan State": {"Seed": 3, "Region": "East"},
@@ -34,7 +34,7 @@ def normalize(name):
 
 @st.cache_data(ttl=300)
 def get_tournament_data():
-    # Pulls the full date range to ensure retroactive logic stays intact
+    # Fetching range to ensure Thursday's settled results are processed first
     url = "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?groups=50&limit=100&dates=20260326-20260330"
     return requests.get(url).json().get('events', [])
 
@@ -56,7 +56,7 @@ def process_pool(events):
     owner_stats = {v: {"Status": "Alive", "Msg": "", "OrigTeam": k} for k, v in INITIAL_MAP.items()}
     match_list, logs = [], []
     
-    # Process chronologically so previous results set the stage for live games
+    # Sort chronologically to ensure Thursday results update ownership before Friday games
     sorted_events = sorted(events, key=lambda x: x['date'])
     
     for event in sorted_events:
@@ -66,7 +66,7 @@ def process_pool(events):
             away = next(t for t in competitors if t['homeAway'] == 'away')
             h_name, a_name = home['team']['displayName'], away['team']['displayName']
             
-            # Map by Name + Seed to prevent Iowa/Iowa St and Michigan/Michigan St overlap
+            # --- THE FIX: STRICT MAPPING VIA SEED + NAME ---
             h_seed = int(home.get('curatedRank', 0) or home.get('seed', 0))
             a_seed = int(away.get('curatedRank', 0) or away.get('seed', 0))
 
@@ -79,7 +79,7 @@ def process_pool(events):
 
             if not h_key or not a_key: continue
 
-            # Get Line (Locked at 4 PM ET of game day)
+            # Get Line locked at 4 PM ET of the day the game was played
             dt = pd.to_datetime(event['date'])
             lock_ts = dt.replace(hour=16, minute=0, second=0).strftime("%Y-%m-%dT%H:%M:%SZ")
             odds_data = get_locked_odds(lock_ts)
