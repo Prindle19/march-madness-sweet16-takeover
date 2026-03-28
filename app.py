@@ -17,7 +17,7 @@ INITIAL_MAP = {
     "St. John's": "Nick", "Nebraska": "Ken", "Alabama": "Burgess dude", "Duke": "Tom"
 }
 
-# Added Region and Seed to ensure strict matching
+# Strict metadata for identification
 TEAM_INFO = {
     "Michigan": {"Seed": 1, "Region": "Midwest"}, "Houston": {"Seed": 2, "Region": "South"},
     "UConn": {"Seed": 2, "Region": "East"}, "Michigan State": {"Seed": 3, "Region": "East"},
@@ -30,11 +30,11 @@ TEAM_INFO = {
 }
 
 def normalize(name):
-    return name.lower().replace("state", "st").replace(".", "").strip()
+    return name.lower().replace("state", "st").replace(".", "").replace("university", "").strip()
 
 @st.cache_data(ttl=300)
 def get_tournament_data():
-    # Range covers the full Sweet 16 to keep history visible
+    # Pulls the full date range to ensure retroactive logic stays intact
     url = "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?groups=50&limit=100&dates=20260326-20260330"
     return requests.get(url).json().get('events', [])
 
@@ -56,7 +56,7 @@ def process_pool(events):
     owner_stats = {v: {"Status": "Alive", "Msg": "", "OrigTeam": k} for k, v in INITIAL_MAP.items()}
     match_list, logs = [], []
     
-    # Process chronologically to maintain the takeover chain
+    # Process chronologically so previous results set the stage for live games
     sorted_events = sorted(events, key=lambda x: x['date'])
     
     for event in sorted_events:
@@ -66,7 +66,7 @@ def process_pool(events):
             away = next(t for t in competitors if t['homeAway'] == 'away')
             h_name, a_name = home['team']['displayName'], away['team']['displayName']
             
-            # Use Seed and Name for strict identification
+            # Map by Name + Seed to prevent Iowa/Iowa St and Michigan/Michigan St overlap
             h_seed = int(home.get('curatedRank', 0) or home.get('seed', 0))
             a_seed = int(away.get('curatedRank', 0) or away.get('seed', 0))
 
@@ -79,7 +79,7 @@ def process_pool(events):
 
             if not h_key or not a_key: continue
 
-            # Get Line (4 PM ET lock)
+            # Get Line (Locked at 4 PM ET of game day)
             dt = pd.to_datetime(event['date'])
             lock_ts = dt.replace(hour=16, minute=0, second=0).strftime("%Y-%m-%dT%H:%M:%SZ")
             odds_data = get_locked_odds(lock_ts)
@@ -129,6 +129,7 @@ def process_pool(events):
                     owner_stats[orig_h_owner]["Status"] = "Eliminated"
                     owner_stats[orig_h_owner]["Msg"] = "Won Game, Lost Spread" if h_score > a_score else "Lost Straight Up"
                     logs.append(f"🔄 **{orig_a_owner}** {tense} **{su_winner}** from **{orig_h_owner}**")
+                
                 if su_loser in pool_state: del pool_state[su_loser]
 
             h_p, a_p = get_probs(h_score, a_score, short_detail, ml)
