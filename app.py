@@ -33,7 +33,7 @@ def normalize(name):
 
 # --- THE FIX: Smart Team Mapping ---
 def get_team_key(raw_name):
-    # Sort keys by length descending so 'Iowa State' is evaluated before 'Iowa'
+    # Sorts so "Iowa State" is evaluated before "Iowa", preventing collisions
     sorted_teams = sorted(INITIAL_MAP.keys(), key=len, reverse=True)
     for k in sorted_teams:
         if normalize(k) in normalize(raw_name):
@@ -71,7 +71,6 @@ def process_pool(events):
             home = next(t for t in competitors if t['homeAway'] == 'home')
             away = next(t for t in competitors if t['homeAway'] == 'away')
             
-            # Using our new smart matching function
             h_key = get_team_key(home['team']['displayName'])
             a_key = get_team_key(away['team']['displayName'])
             
@@ -86,7 +85,6 @@ def process_pool(events):
                 odds_h_key = get_team_key(game['home_team'])
                 odds_a_key = get_team_key(game['away_team'])
                 
-                # Ensure the Odds API game matches our ESPN teams perfectly
                 if (h_key == odds_h_key or h_key == odds_a_key) and (a_key == odds_h_key or a_key == odds_a_key):
                     m = game['bookmakers'][0]['markets']
                     spr_m = next(i for i in m if i['key'] == 'spreads')
@@ -123,17 +121,27 @@ def process_pool(events):
                 su_winner, su_loser = (h_key, a_key) if h_score > a_score else (a_key, h_key)
                 home_covered = h_diff > 0
                 orig_h_owner, orig_a_owner = pool_state[h_key], pool_state[a_key]
+                orig_winner_owner = pool_state[su_winner]
 
                 if home_covered:
                     pool_state[su_winner] = orig_h_owner
                     owner_stats[orig_a_owner]["Status"] = "Eliminated"
                     owner_stats[orig_a_owner]["Msg"] = "Won Game, Lost Team" if a_score > h_score else "Lost Game & Spread"
+                    
+                    # THE FIX: Only log a takeover if the advancing team actually changed hands
+                    if orig_h_owner != orig_winner_owner:
+                        logs.append(f"🔄 **{orig_h_owner}** {tense} **{su_winner}** from **{orig_winner_owner}**")
+
                 else:
                     pool_state[su_winner] = orig_a_owner
                     owner_stats[orig_h_owner]["Status"] = "Eliminated"
                     owner_stats[orig_h_owner]["Msg"] = "Won Game, Lost Spread" if h_score > a_score else "Lost Straight Up"
-                    logs.append(f"🔄 **{orig_a_owner}** {tense} **{su_winner}** from **{orig_h_owner}**")
+                    
+                    # THE FIX: Only log a takeover if the advancing team actually changed hands
+                    if orig_a_owner != orig_winner_owner:
+                        logs.append(f"🔄 **{orig_a_owner}** {tense} **{su_winner}** from **{orig_winner_owner}**")
                 
+                # The loser of the game is physically out of the bracket
                 if su_loser in pool_state: del pool_state[su_loser]
 
             h_p, a_p = get_probs(h_score, a_score, short_detail, ml)
