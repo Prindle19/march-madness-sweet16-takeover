@@ -7,7 +7,7 @@ ODDS_API_KEY = st.secrets.get("API_KEY", "5a5871e7cd461a9cbfca1cbb28efd7ee")
 HISTORICAL_ODDS_URL = "https://api.the-odds-api.com/v4/historical/sports/basketball_ncaab/odds/"
 LIVE_ODDS_URL = "https://api.the-odds-api.com/v4/sports/basketball_ncaab/odds/"
 
-st.set_page_config(page_title="Sweet 16 Takeover", page_icon="🏀", layout="wide")
+st.set_page_config(page_title="Final Four Takeover", page_icon="🏀", layout="wide")
 
 # --- INITIAL HAT PULL ---
 INITIAL_MAP = {
@@ -29,20 +29,12 @@ TEAM_INFO = {
 }
 
 def normalize(name):
-    return name.lower().replace("state", "st").replace(".", "").replace("university", "").strip()
+    return name.lower().replace("state", "st").replace(".", "").replace("boilermakers", "").replace("wildcats", "").replace("huskies", "").replace("fighting illini", "").strip()
 
-# --- THE FIX: Smart Team Mapping ---
-def get_team_key(raw_name):
-    # Sorts so "Iowa State" is evaluated before "Iowa", preventing collisions
-    sorted_teams = sorted(INITIAL_MAP.keys(), key=len, reverse=True)
-    for k in sorted_teams:
-        if normalize(k) in normalize(raw_name):
-            return k
-    return None
-
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=60)
 def get_tournament_data():
-    url = "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?groups=50&limit=100&dates=20260326-20260330"
+    # UPDATED DATE RANGE: Includes Sweet 16, Elite 8, and TODAY'S Final Four (April 4)
+    url = "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?groups=50&limit=100&dates=20260326-20260406"
     return requests.get(url).json().get('events', [])
 
 @st.cache_data(ttl=3600)
@@ -70,10 +62,19 @@ def process_pool(events):
             competitors = event['competitions'][0]['competitors']
             home = next(t for t in competitors if t['homeAway'] == 'home')
             away = next(t for t in competitors if t['homeAway'] == 'away')
+            h_name, a_name = home['team']['displayName'], away['team']['displayName']
             
-            h_key = get_team_key(home['team']['displayName'])
-            a_key = get_team_key(away['team']['displayName'])
-            
+            # STRICT MAPPING: Uses Seed and Name to differentiate State schools
+            h_seed = int(home.get('curatedRank', 0) or home.get('seed', 0))
+            a_seed = int(away.get('curatedRank', 0) or away.get('seed', 0))
+
+            h_key, a_key = None, None
+            for team_name, info in TEAM_INFO.items():
+                if normalize(team_name) in normalize(h_name) and info['Seed'] == h_seed:
+                    h_key = team_name
+                if normalize(team_name) in normalize(a_name) and info['Seed'] == a_seed:
+                    a_key = team_name
+
             if not h_key or not a_key: continue
 
             dt = pd.to_datetime(event['date'])
@@ -81,19 +82,13 @@ def process_pool(events):
             odds_data = get_locked_odds(lock_ts)
             
             spread, ml = 0, 0
+            n_h, n_a = normalize(h_key), normalize(a_key)
             for game in odds_data:
-                odds_h_key = get_team_key(game['home_team'])
-                odds_a_key = get_team_key(game['away_team'])
-                
-                if (h_key == odds_h_key or h_key == odds_a_key) and (a_key == odds_h_key or a_key == odds_a_key):
+                if (n_h in normalize(game['home_team']) or n_h in normalize(game['away_team'])) and \
+                   (n_a in normalize(game['home_team']) or n_a in normalize(game['away_team'])):
                     m = game['bookmakers'][0]['markets']
-                    spr_m = next(i for i in m if i['key'] == 'spreads')
-                    for out in spr_m['outcomes']:
-                        if get_team_key(out['name']) == h_key: spread = float(out['point'])
-                    
-                    h2h_m = next(i for i in m if i['key'] == 'h2h')
-                    for out in h2h_m['outcomes']:
-                        if get_team_key(out['name']) == h_key: ml = float(out['price'])
+                    spread = next(o['point'] for o in next(i for i in m if i['key'] == 'spreads')['outcomes'] if n_h in normalize(o['name']))
+                    ml = next(o['price'] for o in next(i for i in m if i['key'] == 'h2h')['outcomes'] if n_h in normalize(o['name']))
                     break
 
             status = event['status']['type']['state']
@@ -121,60 +116,45 @@ def process_pool(events):
                 su_winner, su_loser = (h_key, a_key) if h_score > a_score else (a_key, h_key)
                 home_covered = h_diff > 0
                 orig_h_owner, orig_a_owner = pool_state[h_key], pool_state[a_key]
-                orig_winner_owner = pool_state[su_winner]
 
                 if home_covered:
                     pool_state[su_winner] = orig_h_owner
                     owner_stats[orig_a_owner]["Status"] = "Eliminated"
                     owner_stats[orig_a_owner]["Msg"] = "Won Game, Lost Team" if a_score > h_score else "Lost Game & Spread"
-                    
-                    # THE FIX: Only log a takeover if the advancing team actually changed hands
-                    if orig_h_owner != orig_winner_owner:
-                        logs.append(f"🔄 **{orig_h_owner}** {tense} **{su_winner}** from **{orig_winner_owner}**")
-
                 else:
                     pool_state[su_winner] = orig_a_owner
                     owner_stats[orig_h_owner]["Status"] = "Eliminated"
                     owner_stats[orig_h_owner]["Msg"] = "Won Game, Lost Spread" if h_score > a_score else "Lost Straight Up"
-                    
-                    # THE FIX: Only log a takeover if the advancing team actually changed hands
-                    if orig_a_owner != orig_winner_owner:
-                        logs.append(f"🔄 **{orig_a_owner}** {tense} **{su_winner}** from **{orig_winner_owner}**")
-                
-                # The loser of the game is physically out of the bracket
+                    logs.append(f"🔄 **{orig_a_owner}** {tense} **{su_winner}** from **{orig_h_owner}**")
                 if su_loser in pool_state: del pool_state[su_loser]
 
             h_p, a_p = get_probs(h_score, a_score, short_detail, ml)
             match_list.append({
-                "Matchup": f"{away['team']['displayName']} @ {home['team']['displayName']}", "Status": short_detail,
-                "Score": f"{a_score} - {h_score}", "Line": f"{h_key} {spread}",
-                "Win Prob": f"{h_key} {h_p}% / {a_key} {a_p}%", "Elimination Status": elim_status
+                "Matchup": f"{a_name} @ {h_name}", "Status": short_detail,
+                "Score": f"{a_score} - {h_score}", "Line": f"{h_name} {spread}",
+                "Win Prob": f"{h_name} {h_p}% / {a_name} {a_p}%", "Elimination Status": elim_status
             })
-        except Exception as e:
-            continue
-            
+        except: continue
     return pool_state, owner_stats, match_list, logs
 
 # --- UI ---
-st.title("🏀 Sweet 16 Takeover Pool")
+st.title("🏀 Final Four Takeover Pool")
 all_events = get_tournament_data()
 current_holders, stats, matches, logs = process_pool(all_events)
 
-st.header("🕒 Matchups & Live Coverage")
+st.header("🕒 Live Final Four Coverage")
 st.dataframe(pd.DataFrame(matches), hide_index=True, use_container_width=True)
 
 col1, col2 = st.columns([1.5, 1])
 with col1:
     st.header("✅ Owners Still Alive")
-    alive_rows = [{"Region": TEAM_INFO[t]["Region"], "Seed": TEAM_INFO[t]["Seed"], "Owner": o, "Team": t} 
-                  for t, o in current_holders.items()]
+    alive_rows = [{"Region": TEAM_INFO[t]["Region"], "Seed": TEAM_INFO[t]["Seed"], "Owner": o, "Team": t} for t, o in current_holders.items()]
     st.dataframe(pd.DataFrame(alive_rows).sort_values(["Region", "Seed"]), hide_index=True, use_container_width=True)
 
 with col2:
     st.header("💀 Eliminated Owners")
     alive_names = list(current_holders.values())
-    dead_rows = [{"Owner": name, "Original Team": data["OrigTeam"], "Status": data["Msg"]} 
-                 for name, data in stats.items() if name not in alive_names and data["Status"] == "Eliminated"]
+    dead_rows = [{"Owner": name, "Original Team": data["OrigTeam"], "Status": data["Msg"]} for name, data in stats.items() if name not in alive_names and data["Status"] == "Eliminated"]
     st.dataframe(pd.DataFrame(dead_rows), hide_index=True, use_container_width=True)
     
     st.header("📜 Takeover History")
@@ -182,4 +162,4 @@ with col2:
 
 st.divider()
 st.subheader("💀 Elimination Key")
-st.write("- **Won Game, Lost Spread:** Team won, but failed to cover. Team goes to underdog owner.\n- **Won Game, Lost Team:** Underdog won the game, but didn't beat spread.\n- **Lost Straight Up:** Favorite lost game and failed to cover.\n- **Lost Game & Spread:** Underdog lost game and failed to cover.")
+st.write("- **Won Game, Lost Spread:** Team won, but failed to cover.\n- **Won Game, Lost Team:** Underdog won the game, but didn't beat spread.\n- **Lost Straight Up:** Favorite lost game and failed to cover.\n- **Lost Game & Spread:** Underdog lost game and failed to cover.")
