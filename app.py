@@ -9,7 +9,7 @@ LIVE_ODDS_URL = "https://api.the-odds-api.com/v4/sports/basketball_ncaab/odds/"
 
 st.set_page_config(page_title="Tournament Takeover Pool", page_icon="🏀", layout="wide")
 
-# --- INITIAL HAT PULL (The Source of Truth) ---
+# --- INITIAL HAT PULL (The Permanent Record) ---
 INITIAL_MAP = {
     "Michigan": "Greg Doc", "Houston": "Ryan Doc", "UConn": "Joe Doc", "Michigan State": "DOB",
     "Texas": "Schroller", "Tennessee": "Jimmy A", "Purdue": "Jim Henry", "Iowa": "EJ",
@@ -33,7 +33,7 @@ def normalize(name):
 
 @st.cache_data(ttl=60)
 def get_tournament_data():
-    # FORCES FETCH OF ENTIRE TOURNAMENT RANGE (MAR 26 - APR 6)
+    # Fetching every game from the start of Sweet 16 through the Championship
     url = "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?groups=50&limit=100&dates=20260326-20260406"
     return requests.get(url).json().get('events', [])
 
@@ -55,7 +55,7 @@ def process_pool(events):
     owner_stats = {v: {"Status": "Alive", "Msg": "", "OrigTeam": k} for k, v in INITIAL_MAP.items()}
     match_list, logs = [], []
     
-    # SORT CHRONOLOGICALLY - This ensures Thursday takeovers update the "Owner" before Friday games start
+    # Sorting ensures Thursday's results are processed BEFORE Saturday's live games
     sorted_events = sorted(events, key=lambda x: x['date'])
     
     for event in sorted_events:
@@ -65,7 +65,7 @@ def process_pool(events):
             away = next(t for t in competitors if t['homeAway'] == 'away')
             h_name, a_name = home['team']['displayName'], away['team']['displayName']
             
-            # STRICT ID MAPPING: Matches by Seed + Name to prevent Michigan/MSU confusion
+            # STRICT MAPPING BY SEED - This prevents the Michigan/MSU confusion
             h_seed = int(home.get('curatedRank', 0) or home.get('seed', 0))
             a_seed = int(away.get('curatedRank', 0) or away.get('seed', 0))
 
@@ -78,7 +78,7 @@ def process_pool(events):
 
             if not h_key or not a_key: continue
 
-            # Get Line (Locked at 4 PM ET of game day)
+            # Get Line (4 PM ET lock for that specific game day)
             dt = pd.to_datetime(event['date'])
             lock_ts = dt.replace(hour=16, minute=0, second=0).strftime("%Y-%m-%dT%H:%M:%SZ")
             odds_data = get_locked_odds(lock_ts)
@@ -128,6 +128,7 @@ def process_pool(events):
                     owner_stats[orig_h_owner]["Status"] = "Eliminated"
                     owner_stats[orig_h_owner]["Msg"] = "Won Game, Lost Spread" if h_score > a_score else "Lost Straight Up"
                     logs.append(f"🔄 **{orig_a_owner}** {tense} **{su_winner}** from **{orig_h_owner}**")
+                
                 if su_loser in pool_state: del pool_state[su_loser]
 
             h_p, a_p = get_probs(h_score, a_score, short_detail, ml)
@@ -144,7 +145,7 @@ st.title("🏀 Tournament Takeover Pool")
 all_events = get_tournament_data()
 current_holders, stats, matches, logs = process_pool(all_events)
 
-st.header("🕒 Matchups & Coverage")
+st.header("🕒 Live Matchups & Coverage")
 st.dataframe(pd.DataFrame(matches), hide_index=True, use_container_width=True)
 
 col1, col2 = st.columns([1.5, 1])
