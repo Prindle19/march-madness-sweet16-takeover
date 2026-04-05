@@ -7,9 +7,9 @@ ODDS_API_KEY = st.secrets.get("API_KEY", "5a5871e7cd461a9cbfca1cbb28efd7ee")
 HISTORICAL_ODDS_URL = "https://api.the-odds-api.com/v4/historical/sports/basketball_ncaab/odds/"
 LIVE_ODDS_URL = "https://api.the-odds-api.com/v4/sports/basketball_ncaab/odds/"
 
-st.set_page_config(page_title="Final Four Takeover Pool", page_icon="🏀", layout="wide")
+st.set_page_config(page_title="Sweet 16 Takeover Pool", page_icon="🏀", layout="wide")
 
-# --- INITIAL HAT PULL ---
+# --- INITIAL HAT PULL (The Source of Truth) ---
 INITIAL_MAP = {
     "Michigan": "Greg Doc", "Houston": "Ryan Doc", "UConn": "Joe Doc", "Michigan State": "DOB",
     "Texas": "Schroller", "Tennessee": "Jimmy A", "Purdue": "Jim Henry", "Iowa": "EJ",
@@ -33,7 +33,7 @@ def normalize(name):
 
 @st.cache_data(ttl=60)
 def get_tournament_data():
-    # UPDATED DATE RANGE: Sweet 16 (March 26) through the Championship (April 6)
+    # USES BROAD DATE RANGE: Covers Sweet 16 (Mar 26) through Championship (Apr 6)
     url = "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?groups=50&limit=100&dates=20260326-20260406"
     return requests.get(url).json().get('events', [])
 
@@ -52,9 +52,11 @@ def get_probs(h_score, a_score, status, ml):
 
 def process_pool(events):
     pool_state = INITIAL_MAP.copy()
+    # Tracking every original owner's health
     owner_stats = {v: {"Status": "Alive", "Msg": "", "OrigTeam": k} for k, v in INITIAL_MAP.items()}
     match_list, logs = [], []
     
+    # Process events in order so ownership flows through rounds (S16 -> E8 -> F4)
     sorted_events = sorted(events, key=lambda x: x['date'])
     
     for event in sorted_events:
@@ -63,11 +65,10 @@ def process_pool(events):
             home = next(t for t in competitors if t['homeAway'] == 'home')
             away = next(t for t in competitors if t['homeAway'] == 'away')
             h_name, a_name = home['team']['displayName'], away['team']['displayName']
-            
-            # --- STRICT ID VIA SEED ---
             h_seed = int(home.get('curatedRank', 0) or home.get('seed', 0))
             a_seed = int(away.get('curatedRank', 0) or away.get('seed', 0))
 
+            # STRICT MAPPING
             h_key, a_key = None, None
             for team_name, info in TEAM_INFO.items():
                 if normalize(team_name) in normalize(h_name) and info['Seed'] == h_seed:
@@ -77,7 +78,7 @@ def process_pool(events):
 
             if not h_key or not a_key: continue
 
-            # Get Line (4 PM ET lock)
+            # Get Line (4 PM ET lock for that game day)
             dt = pd.to_datetime(event['date'])
             lock_ts = dt.replace(hour=16, minute=0, second=0).strftime("%Y-%m-%dT%H:%M:%SZ")
             odds_data = get_locked_odds(lock_ts)
@@ -139,11 +140,11 @@ def process_pool(events):
     return pool_state, owner_stats, match_list, logs
 
 # --- UI ---
-st.title("🏀 Final Four Takeover Pool")
+st.title("🏀 Sweet 16 Takeover Pool")
 all_events = get_tournament_data()
 current_holders, stats, matches, logs = process_pool(all_events)
 
-st.header("🕒 Live Final Four Coverage")
+st.header("🕒 Live Matchups & Coverage")
 st.dataframe(pd.DataFrame(matches), hide_index=True, use_container_width=True)
 
 col1, col2 = st.columns([1.5, 1])
@@ -155,9 +156,10 @@ with col1:
 
 with col2:
     st.header("💀 Eliminated Owners")
+    # Owners are truly dead if they don't hold any teams in current_holders
     alive_names = list(current_holders.values())
     dead_rows = [{"Owner": name, "Original Team": data["OrigTeam"], "Status": data["Msg"]} 
-                 for name, data in owner_stats.items() if name not in alive_names and data["Status"] == "Eliminated"]
+                 for name, data in stats.items() if name not in alive_names and data["Status"] == "Eliminated"]
     st.dataframe(pd.DataFrame(dead_rows), hide_index=True, use_container_width=True)
     
     st.header("📜 Takeover History")
@@ -165,9 +167,4 @@ with col2:
 
 st.divider()
 st.subheader("💀 Elimination Key")
-st.write("""
-- **Won Game, Lost Spread:** Your team won, but failed to cover. You lose the team to the underdog owner.
-- **Won Game, Lost Team:** Your underdog won the game, but didn't beat the spread. The favorite owner keeps the spot.
-- **Lost Straight Up:** Your favorite lost the game and failed to cover the spread.
-- **Lost Game & Spread:** Your underdog lost the game and failed to cover the spread.
-""")
+st.write("- **Won Game, Lost Spread:** Your team won, but failed to cover the spread. Team goes to underdog owner.\n- **Won Game, Lost Team:** Your underdog won the game, but didn't beat the spread. The favorite owner keeps the advancing spot.\n- **Lost Straight Up:** Your favorite lost the game and failed to cover the spread.\n- **Lost Game & Spread:** Your underdog lost the game and failed to cover the spread.")
